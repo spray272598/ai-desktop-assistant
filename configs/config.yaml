@@ -1,0 +1,61 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+  mode: "debug"
+
+agent:
+  name: "AI Desktop Assistant"
+  version: "1.0.0"
+  max_steps: 15
+  timeout: 120
+  token_budget: 16000
+
+llm:
+  provider: "siliconflow"
+  model: "deepseek-ai/DeepSeek-V3"
+  api_key: ""          # 也可用环境变量 LLM_API_KEY
+  api_base: "https://api.siliconflow.cn/v1"
+  use_mock: false      # 无 api_key 时自动降级为 mock
+
+desktop:
+  workspace: "./workspace"
+  temp_dir: "./temp"
+  screenshot_dir: "./screenshots"
+
+database:
+  type: "memory"
+  mysql:
+    host: "mysql"
+    port: 3306
+    database: "ai_desktop_assistant"
+    username: "root"
+    password: "123456"
+
+redis:
+  enabled: false
+  host: "redis"
+  port: 6379
+
+logging:
+  level: "info"
+  file: "logs/assistant.log"
+
+tools:
+  file:
+    enabled: true
+    base_dir: "./workspace"
+  command:
+    enabled: true
+    max_timeout: 60
+    deny_list:
+      - "rm -rf /"
+      - "format"
+      - "mkfs"
+      - "shutdown"
+      - "reboot"
+      - "del /f /s /q"
+  screenshot:
+    enabled: true
+    save_dir: "./screenshots"
+  browser:
+    enabled: false

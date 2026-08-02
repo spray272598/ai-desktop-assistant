@@ -1,0 +1,29 @@
+# bin
+*.exe
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+/assistant
+/server
+
+# workspace runtime
+/workspace/*
+!/workspace/.gitkeep
+/screenshots/*
+!/screenshots/.gitkeep
+/logs/*
+/temp/*
+
+# ide
+.idea/
+.vscode/
+*.swp
+
+# env
+.env
+.env.local
+
+# go
+vendor/

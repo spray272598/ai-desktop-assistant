@@ -1,0 +1,10 @@
+.git
+.idea
+.vscode
+workspace/*
+!workspace/.gitkeep
+screenshots/*
+logs/*
+*.exe
+*.log
+web/node_modules

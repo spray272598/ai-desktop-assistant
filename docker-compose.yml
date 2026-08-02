@@ -1,0 +1,41 @@
+services:
+  assistant:
+    build: .
+    container_name: ai-desktop-assistant
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - TZ=Asia/Shanghai
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8080
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_API_BASE=${LLM_API_BASE:-https://api.siliconflow.cn/v1}
+      - LLM_MODEL=${LLM_MODEL:-deepseek-ai/DeepSeek-V3}
+      - LLM_USE_MOCK=${LLM_USE_MOCK:-true}
+      - DESKTOP_WORKSPACE=/app/workspace
+    volumes:
+      - ./workspace:/app/workspace
+      - ./screenshots:/app/screenshots
+      - ./logs:/app/logs
+      - ./configs/config.yaml:/app/configs/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # 可选：后续持久化扩展
+  # mysql:
+  #   image: mysql:8.0
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: "123456"
+  #     MYSQL_DATABASE: ai_desktop_assistant
+  #   ports:
+  #     - "13306:3306"
+  #   volumes:
+  #     - mysql_data:/var/lib/mysql
+
+# volumes:
+#   mysql_data:
