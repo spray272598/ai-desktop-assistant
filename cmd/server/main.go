@@ -54,7 +54,18 @@ func main() {
 func runHTTP(app *bootstrap.App, cfg *config.Config) {
 	srv := httpserver.NewServer(app.AgentApp, cfg.Addr()).
 		WithToolDescriptions(app.Tools.GetToolDescriptions).
-		WithWebDir("web")
+		WithWebDir("web").
+		WithWebSocket(app.WSHub.Handle).
+		WithDeviceList(app.WSHub.ListDevices).
+		WithModelRoutes(func() interface{} {
+			if app.ModelRouter == nil {
+				return map[string]interface{}{}
+			}
+			return map[string]interface{}{
+				"routes": app.ModelRouter.Routes(),
+				"models": app.ModelRouter.List(),
+			}
+		})
 
 	go func() {
 		if err := srv.Start(); err != nil {
@@ -63,9 +74,8 @@ func runHTTP(app *bootstrap.App, cfg *config.Config) {
 	}()
 
 	fmt.Printf("🌐 HTTP 服务: http://%s\n", cfg.Addr())
-	fmt.Println("   POST /api/v1/session/create")
-	fmt.Println("   POST /api/v1/chat")
-	fmt.Println("   POST /api/v1/chat/stream  (SSE)")
+	fmt.Println("   Web UI:  /  (React 控制台)")
+	fmt.Println("   POST /api/v1/chat  |  WS /ws")
 	fmt.Println("   GET  /health")
 
 	quit := make(chan os.Signal, 1)

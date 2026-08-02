@@ -13,6 +13,7 @@ import (
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/engine"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/security"
 	mcpsvc "github.com/ai-desktop/assistant/internal/domain/mcp/service"
+	redisx "github.com/ai-desktop/assistant/internal/infrastructure/redis"
 	"github.com/ai-desktop/assistant/internal/types/common"
 )
 
@@ -22,6 +23,11 @@ type AgentApp struct {
 	sessionRepo    repository.ISessionRepository
 	messageRepo    repository.IMessageRepository
 	mcpService     *mcpsvc.MCPService
+	marketplace    *mcpsvc.Marketplace
+	exportSvc      *ExportService
+	redis          *redisx.Client
+	rateEnabled    bool
+	ratePerMin     int
 	permGuard      *security.PermissionGuard
 	defaultAgentID string
 	timeoutSec     int
@@ -49,9 +55,19 @@ func NewAgentApp(
 	}
 }
 
-func (app *AgentApp) SetMCPService(s *mcpsvc.MCPService)          { app.mcpService = s }
+func (app *AgentApp) SetMCPService(s *mcpsvc.MCPService)             { app.mcpService = s }
 func (app *AgentApp) SetPermissionGuard(g *security.PermissionGuard) { app.permGuard = g }
-func (app *AgentApp) MCPService() *mcpsvc.MCPService              { return app.mcpService }
+func (app *AgentApp) SetMarketplace(m *mcpsvc.Marketplace)           { app.marketplace = m }
+func (app *AgentApp) SetExport(e *ExportService)                     { app.exportSvc = e }
+func (app *AgentApp) SetRedis(r *redisx.Client)                      { app.redis = r }
+func (app *AgentApp) SetRateLimit(enabled bool, perMin int) {
+	app.rateEnabled = enabled
+	app.ratePerMin = perMin
+}
+func (app *AgentApp) MCPService() *mcpsvc.MCPService   { return app.mcpService }
+func (app *AgentApp) Marketplace() *mcpsvc.Marketplace { return app.marketplace }
+func (app *AgentApp) Export() *ExportService           { return app.exportSvc }
+func (app *AgentApp) Redis() *redisx.Client            { return app.redis }
 func (app *AgentApp) PermissionGuard() *security.PermissionGuard {
 	if app.permGuard != nil {
 		return app.permGuard
@@ -60,6 +76,25 @@ func (app *AgentApp) PermissionGuard() *security.PermissionGuard {
 		return app.engine.PermissionGuard()
 	}
 	return nil
+}
+
+// CheckRateLimit 返回是否允许
+func (app *AgentApp) CheckRateLimit(ctx context.Context, userID string) (bool, error) {
+	if !app.rateEnabled {
+		return true, nil
+	}
+	if userID == "" {
+		userID = "anonymous"
+	}
+	limit := app.ratePerMin
+	if limit <= 0 {
+		limit = 60
+	}
+	if app.redis == nil {
+		return true, nil
+	}
+	key := "rl:chat:" + userID
+	return app.redis.AllowRate(ctx, key, limit, time.Minute)
 }
 
 func (app *AgentApp) CreateSession(req dto.CreateSessionRequest) *dto.CreateSessionResponse {
@@ -91,6 +126,15 @@ func (app *AgentApp) Chat(req dto.ChatRequest) (*dto.ChatResponse, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(app.timeoutSec)*time.Second)
 	defer cancel()
+
+	if ok, err := app.CheckRateLimit(ctx, req.UserID); err == nil && !ok {
+		return nil, fmt.Errorf("rate limit exceeded, try again later")
+	}
+
+	// 会话摘要缓存（Redis）
+	if app.redis != nil && app.redis.Enabled() && session.ID != "" {
+		_ = app.redis.Set(ctx, "sess:last:"+session.ID, req.Message, 24*time.Hour)
+	}
 
 	autoApprove := req.AutoApprove
 	if !autoApprove && req.Params != nil {

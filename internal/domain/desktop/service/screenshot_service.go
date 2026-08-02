@@ -1,70 +1,89 @@
 package service
 
 import (
-	"encoding/base64"
 	"fmt"
+	"image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"time"
 
+	"github.com/kbinani/screenshot"
+
 	"github.com/ai-desktop/assistant/internal/domain/desktop/model/valobj"
 )
 
+// ScreenshotService 多后端截图：kbinani/screenshot → 平台原生命令
 type ScreenshotService struct {
 	saveDir string
 }
 
 func NewScreenshotService(saveDir string) *ScreenshotService {
-	abs, _ := filepath.Abs(saveDir)
-	if abs == "" {
-		abs = saveDir
+	if saveDir == "" {
+		saveDir = "./screenshots"
 	}
-	_ = os.MkdirAll(abs, 0755)
-	return &ScreenshotService{saveDir: abs}
+	abs, _ := filepath.Abs(saveDir)
+	if abs != "" {
+		saveDir = abs
+	}
+	_ = os.MkdirAll(saveDir, 0755)
+	return &ScreenshotService{saveDir: saveDir}
 }
 
 func (s *ScreenshotService) TakeScreenshot(op *valobj.ScreenshotOperation) (*valobj.ScreenshotResult, error) {
 	if op == nil {
 		op = &valobj.ScreenshotOperation{}
 	}
-	format := s.getFormat(op.Format)
+	format := op.Format
+	if format == "" {
+		format = "png"
+	}
 	outputPath := filepath.Join(s.saveDir, fmt.Sprintf("screenshot_%d.%s", time.Now().UnixMilli(), format))
 
+	// 1) pure-go 主路径
+	if err := s.captureKbinani(outputPath); err == nil {
+		return s.readResult(outputPath, format)
+	}
+
+	// 2) 平台命令
 	var err error
 	switch runtime.GOOS {
 	case "windows":
-		err = s.captureWindows(outputPath)
+		err = s.captureWindowsPS(outputPath)
 	case "darwin":
 		err = exec.Command("screencapture", "-x", outputPath).Run()
 	default:
-		// Linux: 尝试 gnome-screenshot / import / scrot
 		err = s.captureLinux(outputPath)
 	}
-
 	if err != nil {
 		return &valobj.ScreenshotResult{
 			Success:  false,
 			ErrorMsg: fmt.Sprintf("截图失败 (%s): %v。容器环境通常无法截取宿主机屏幕。", runtime.GOOS, err),
 		}, nil
 	}
-
-	data, err := os.ReadFile(outputPath)
-	if err != nil {
-		return &valobj.ScreenshotResult{Success: false, ErrorMsg: "读取截图失败: " + err.Error()}, nil
-	}
-
-	return &valobj.ScreenshotResult{
-		Success:   true,
-		ImageData: base64.StdEncoding.EncodeToString(data),
-		ImagePath: outputPath,
-		Format:    format,
-	}, nil
+	return s.readResult(outputPath, format)
 }
 
-func (s *ScreenshotService) captureWindows(outputPath string) error {
-	// 使用 PowerShell + .NET
+func (s *ScreenshotService) captureKbinani(outputPath string) error {
+	n := screenshot.NumActiveDisplays()
+	if n <= 0 {
+		return fmt.Errorf("no active display")
+	}
+	bounds := screenshot.GetDisplayBounds(0)
+	img, err := screenshot.CaptureRect(bounds)
+	if err != nil {
+		return err
+	}
+	f, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return png.Encode(f, img)
+}
+
+func (s *ScreenshotService) captureWindowsPS(outputPath string) error {
 	ps := fmt.Sprintf(`
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -75,8 +94,7 @@ $g.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
 $bmp.Save('%s')
 $g.Dispose(); $bmp.Dispose()
 `, filepath.ToSlash(outputPath))
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps)
-	return cmd.Run()
+	return exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps).Run()
 }
 
 func (s *ScreenshotService) captureLinux(outputPath string) error {
@@ -89,12 +107,22 @@ func (s *ScreenshotService) captureLinux(outputPath string) error {
 	if err := exec.Command("import", "-window", "root", outputPath).Run(); err == nil {
 		return nil
 	}
-	return fmt.Errorf("no screenshot tool available (gnome-screenshot/scrot/import)")
+	return fmt.Errorf("no screenshot backend (kbinani/gnome-screenshot/scrot/import)")
 }
 
-func (s *ScreenshotService) getFormat(format string) string {
-	if format == "" {
-		return "png"
+func (s *ScreenshotService) readResult(path, format string) (*valobj.ScreenshotResult, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return &valobj.ScreenshotResult{Success: false, ErrorMsg: "读取截图失败: " + err.Error()}, nil
 	}
-	return format
+	// base64 可选；为控制体积只返回路径 + 大小
+	return &valobj.ScreenshotResult{
+		Success:   true,
+		ImagePath: path,
+		Format:    format,
+		Width:     0,
+		Height:    0,
+		ImageData: "", // 大图不塞 base64，避免上下文爆炸
+		ErrorMsg:  fmt.Sprintf("bytes=%d", len(data)),
+	}, nil
 }

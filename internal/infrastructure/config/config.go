@@ -19,6 +19,8 @@ type Config struct {
 	Logging  LoggingConfig  `yaml:"logging"`
 	Tools    ToolsConfig    `yaml:"tools"`
 	MCP      MCPConfig      `yaml:"mcp"`
+	Sandbox  SandboxConfig  `yaml:"sandbox"`
+	RateLimit RateLimitConfig `yaml:"rate_limit"`
 }
 
 type ServerConfig struct {
@@ -36,11 +38,20 @@ type AgentConfig struct {
 }
 
 type LLMConfig struct {
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
-	APIKey   string `yaml:"api_key"`
-	APIBase  string `yaml:"api_base"`
-	UseMock  bool   `yaml:"use_mock"`
+	Provider   string            `yaml:"provider"`
+	Model      string            `yaml:"model"`
+	APIKey     string            `yaml:"api_key"`
+	APIBase    string            `yaml:"api_base"`
+	UseMock    bool              `yaml:"use_mock"`
+	// Models A/B 模型档
+	Models     map[string]ModelEntry `yaml:"models"`
+}
+
+type ModelEntry struct {
+	Model    string   `yaml:"model"`
+	APIBase  string   `yaml:"api_base"`
+	Weight   int      `yaml:"weight"`
+	Scenarios []string `yaml:"scenarios"`
 }
 
 type DesktopConfig struct {
@@ -50,7 +61,7 @@ type DesktopConfig struct {
 }
 
 type DatabaseConfig struct {
-	Type        string      `yaml:"type"` // memory | mysql
+	Type        string      `yaml:"type"`
 	AutoMigrate bool        `yaml:"auto_migrate"`
 	SchemaPath  string      `yaml:"schema_path"`
 	MySQL       MySQLConfig `yaml:"mysql"`
@@ -65,9 +76,11 @@ type MySQLConfig struct {
 }
 
 type RedisConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Host    string `yaml:"host"`
-	Port    int    `yaml:"port"`
+	Enabled  bool   `yaml:"enabled"`
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	Password string `yaml:"password"`
+	DB       int    `yaml:"db"`
 }
 
 type LoggingConfig struct {
@@ -80,6 +93,7 @@ type ToolsConfig struct {
 	Command    CommandToolConfig `yaml:"command"`
 	Screenshot ToolToggle        `yaml:"screenshot"`
 	Browser    ToolToggle        `yaml:"browser"`
+	Sandbox    ToolToggle        `yaml:"sandbox"`
 }
 
 type ToolToggle struct {
@@ -102,7 +116,7 @@ type MCPConfig struct {
 
 type MCPServerConfig struct {
 	Name       string            `yaml:"name"`
-	Transport  string            `yaml:"transport"` // stdio | sse | http
+	Transport  string            `yaml:"transport"`
 	Command    string            `yaml:"command"`
 	Args       []string          `yaml:"args"`
 	Env        map[string]string `yaml:"env"`
@@ -111,18 +125,34 @@ type MCPServerConfig struct {
 	TimeoutSec int               `yaml:"timeout_sec"`
 }
 
+type SandboxConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	UseDocker  bool   `yaml:"use_docker"`
+	WorkDir    string `yaml:"work_dir"`
+}
+
+type RateLimitConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// 每分钟每 user 请求上限
+	PerMinute int `yaml:"per_minute"`
+}
+
 func Default() *Config {
 	return &Config{
 		Server: ServerConfig{Host: "0.0.0.0", Port: 8080, Mode: "debug"},
 		Agent: AgentConfig{
-			Name: "AI Desktop Assistant", Version: "1.0.0",
+			Name: "AI Desktop Assistant", Version: "1.1.0",
 			MaxSteps: 15, Timeout: 120, TokenBudget: 16000,
 		},
 		LLM: LLMConfig{
 			Provider: "siliconflow",
 			Model:    "deepseek-ai/DeepSeek-V3",
 			APIBase:  "https://api.siliconflow.cn/v1",
-			UseMock:  false,
+			Models: map[string]ModelEntry{
+				"fast":   {Model: "deepseek-ai/DeepSeek-V3", Weight: 2, Scenarios: []string{"chat", "file", "command", "browser"}},
+				"strong": {Model: "deepseek-ai/DeepSeek-V3", Weight: 1, Scenarios: []string{"complex", "code"}},
+				"default": {Model: "deepseek-ai/DeepSeek-V3", Weight: 1, Scenarios: []string{"chat"}},
+			},
 		},
 		Desktop: DesktopConfig{
 			Workspace: "./workspace", TempDir: "./temp", ScreenshotDir: "./screenshots",
@@ -136,22 +166,33 @@ func Default() *Config {
 				Username: "root", Password: "123456",
 			},
 		},
+		Redis: RedisConfig{Enabled: false, Host: "127.0.0.1", Port: 6379},
 		Logging: LoggingConfig{Level: "info"},
 		Tools: ToolsConfig{
 			File:       ToolToggle{Enabled: true, BaseDir: "./workspace"},
-			Command:    CommandToolConfig{Enabled: true, MaxTimeout: 60, DenyList: []string{"rm -rf /", "format", "mkfs", "shutdown", "reboot", "del /f /s /q"}},
-			Screenshot: ToolToggle{Enabled: false, SaveDir: "./screenshots"},
+			Command:    CommandToolConfig{Enabled: true, MaxTimeout: 60, DenyList: defaultDenyRegex()},
+			Screenshot: ToolToggle{Enabled: true, SaveDir: "./screenshots"},
+			Browser:    ToolToggle{Enabled: true},
+			Sandbox:    ToolToggle{Enabled: true},
 		},
+		Sandbox: SandboxConfig{Enabled: true, UseDocker: true, WorkDir: "./temp/sandbox"},
+		RateLimit: RateLimitConfig{Enabled: true, PerMinute: 60},
 		MCP: MCPConfig{
 			Enabled: true,
 			Servers: []MCPServerConfig{
-				{
-					Name: "demo", Transport: "stdio",
-					Command: "", // 运行时由 bootstrap 解析为 mcp-demo 二进制
-					Args:    nil, TimeoutSec: 30,
-				},
+				{Name: "demo", Transport: "stdio", Command: "", TimeoutSec: 30},
 			},
 		},
+	}
+}
+
+func defaultDenyRegex() []string {
+	return []string{
+		`(?i)\brm\s+-rf?\s+/?(\s|$)`,
+		`(?i)\bformat\b`,
+		`(?i)\bmkfs`,
+		`(?i)\b(shutdown|reboot)\b`,
+		`(?i)\bdel\s+/[fFsS]*\s*/[sS]\s*/[qQ]`,
 	}
 }
 
@@ -198,11 +239,6 @@ func applyEnv(cfg *Config) {
 		cfg.Desktop.Workspace = v
 		cfg.Tools.File.BaseDir = v
 	}
-	if v := os.Getenv("AGENT_MAX_STEPS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Agent.MaxSteps = n
-		}
-	}
 	if v := os.Getenv("DB_TYPE"); v != "" {
 		cfg.Database.Type = v
 	}
@@ -223,8 +259,25 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("MYSQL_PASSWORD"); v != "" {
 		cfg.Database.MySQL.Password = v
 	}
+	if v := os.Getenv("REDIS_ENABLED"); v != "" {
+		cfg.Redis.Enabled = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("REDIS_HOST"); v != "" {
+		cfg.Redis.Host = v
+	}
+	if v := os.Getenv("REDIS_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			cfg.Redis.Port = p
+		}
+	}
 	if v := os.Getenv("MCP_ENABLED"); v != "" {
 		cfg.MCP.Enabled = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("BROWSER_ENABLED"); v != "" {
+		cfg.Tools.Browser.Enabled = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("SANDBOX_DOCKER"); v != "" {
+		cfg.Sandbox.UseDocker = strings.EqualFold(v, "true") || v == "1"
 	}
 }
 
@@ -256,19 +309,17 @@ func normalize(cfg *Config) {
 	if cfg.Database.MySQL.Port <= 0 {
 		cfg.Database.MySQL.Port = 3306
 	}
-	if cfg.Database.MySQL.Host == "" {
-		cfg.Database.MySQL.Host = "127.0.0.1"
+	if cfg.Redis.Port <= 0 {
+		cfg.Redis.Port = 6379
 	}
-	if cfg.Database.MySQL.Database == "" {
-		cfg.Database.MySQL.Database = "ai_desktop_assistant"
+	if cfg.RateLimit.PerMinute <= 0 {
+		cfg.RateLimit.PerMinute = 60
+	}
+	if cfg.Sandbox.WorkDir == "" {
+		cfg.Sandbox.WorkDir = "./temp/sandbox"
 	}
 }
 
 func (c *Config) Addr() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
-}
-
-func (c *Config) MySQLDSN() string {
-	m := c.Database.MySQL
-	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", m.Username, m.Password, m.Host, m.Port, m.Database)
 }

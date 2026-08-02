@@ -23,6 +23,9 @@ import (
 type Server struct {
 	app          *application.AgentApp
 	toolDescFunc func() []map[string]string
+	wsHandler    http.HandlerFunc
+	modelRoutes  func() interface{}
+	listDevices  func() []string
 	webDir       string
 	addr         string
 	server       *http.Server
@@ -42,6 +45,21 @@ func (s *Server) WithWebDir(dir string) *Server {
 	return s
 }
 
+func (s *Server) WithWebSocket(h http.HandlerFunc) *Server {
+	s.wsHandler = h
+	return s
+}
+
+func (s *Server) WithDeviceList(fn func() []string) *Server {
+	s.listDevices = fn
+	return s
+}
+
+func (s *Server) WithModelRoutes(fn func() interface{}) *Server {
+	s.modelRoutes = fn
+	return s
+}
+
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
@@ -51,6 +69,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/v1/session/info", s.handleSessionInfo)
 	mux.HandleFunc("/api/v1/session/list", s.handleSessionList)
 	mux.HandleFunc("/api/v1/session/messages", s.handleSessionMessages)
+	mux.HandleFunc("/api/v1/session/export", s.handleSessionExport)
+	mux.HandleFunc("/api/v1/session/import", s.handleSessionImport)
 
 	// chat / tools
 	mux.HandleFunc("/api/v1/tools", s.handleTools)
@@ -62,12 +82,24 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/v1/permission/approve", s.handlePermissionApprove)
 	mux.HandleFunc("/api/v1/permission/reject", s.handlePermissionReject)
 
-	// MCP 热加载
+	// MCP 热加载 + 插件市场
 	mux.HandleFunc("/api/v1/mcp/servers", s.handleMCPServers)
 	mux.HandleFunc("/api/v1/mcp/servers/delete", s.handleMCPDelete)
 	mux.HandleFunc("/api/v1/mcp/reload", s.handleMCPReload)
+	mux.HandleFunc("/api/v1/mcp/market", s.handleMCPMarket)
+	mux.HandleFunc("/api/v1/mcp/market/install", s.handleMCPMarketInstall)
+	mux.HandleFunc("/api/v1/mcp/market/uninstall", s.handleMCPMarketUninstall)
 
-	// Web 静态壳
+	// 模型 A/B
+	mux.HandleFunc("/api/v1/models", s.handleModels)
+
+	// WebSocket 设备控制
+	if s.wsHandler != nil {
+		mux.HandleFunc("/ws", s.wsHandler)
+		mux.HandleFunc("/api/v1/devices", s.handleDevices)
+	}
+
+	// Web（优先 dist，再 web）
 	mux.HandleFunc("/", s.handleWeb)
 
 	handler := corsMiddleware(loggingMiddleware(mux))
@@ -363,42 +395,173 @@ func (s *Server) handleMCPReload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response.Success(map[string]bool{"reloaded": true}))
 }
 
+func (s *Server) handleMCPMarket(w http.ResponseWriter, r *http.Request) {
+	m := s.app.Marketplace()
+	if m == nil {
+		writeJSON(w, http.StatusOK, response.Success([]interface{}{}))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(m.List()))
+}
+
+func (s *Server) handleMCPMarketInstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, response.ErrorFromCode(enums.InvalidParam))
+		return
+	}
+	m := s.app.Marketplace()
+	if m == nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "marketplace unavailable"))
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == "" {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "id required"))
+		return
+	}
+	if err := m.Install(r.Context(), body.ID); err != nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(map[string]bool{"installed": true}))
+}
+
+func (s *Server) handleMCPMarketUninstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, response.ErrorFromCode(enums.InvalidParam))
+		return
+	}
+	m := s.app.Marketplace()
+	if m == nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "marketplace unavailable"))
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == "" {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "id required"))
+		return
+	}
+	if err := m.Uninstall(r.Context(), body.ID); err != nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(map[string]bool{"uninstalled": true}))
+}
+
+func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
+	exp := s.app.Export()
+	if exp == nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "export unavailable"))
+		return
+	}
+	sid := r.URL.Query().Get("sessionId")
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "json"
+	}
+	if sid == "" {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "sessionId required"))
+		return
+	}
+	var path string
+	var err error
+	if format == "md" || format == "markdown" {
+		path, err = exp.ExportMarkdown(r.Context(), sid)
+	} else {
+		path, err = exp.ExportJSON(r.Context(), sid)
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, response.Error(enums.SystemError.Code, err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(map[string]string{"path": path, "format": format}))
+}
+
+func (s *Server) handleSessionImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, response.ErrorFromCode(enums.InvalidParam))
+		return
+	}
+	exp := s.app.Export()
+	if exp == nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "export unavailable"))
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Path == "" {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "path required"))
+		return
+	}
+	id, err := exp.ImportJSON(r.Context(), body.Path)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(map[string]string{"sessionId": id}))
+}
+
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	if s.modelRoutes == nil {
+		writeJSON(w, http.StatusOK, response.Success(map[string]interface{}{}))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(s.modelRoutes()))
+}
+
+func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
+	devices := []string{}
+	if s.listDevices != nil {
+		devices = s.listDevices()
+	}
+	writeJSON(w, http.StatusOK, response.Success(map[string]interface{}{
+		"devices": devices,
+		"ws":      "/ws?role=device&deviceId=phone-1",
+		"hint":    "手机 Agent 连接 WebSocket 后可收发 command/result",
+	}))
+}
+
 // ---- web ----
 
 func (s *Server) handleWeb(w http.ResponseWriter, r *http.Request) {
-	// API 路径不应落到这里
-	if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/health" {
+	if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/health" || r.URL.Path == "/ws" {
 		http.NotFound(w, r)
 		return
 	}
-	dir := s.webDir
-	if dir == "" {
-		dir = "web"
+	// 优先 React 构建产物 web/dist，其次 web/
+	dirs := []string{}
+	if s.webDir != "" {
+		dirs = append(dirs, filepath.Join(s.webDir, "dist"), s.webDir)
 	}
-	// 默认 index
+	dirs = append(dirs, "web/dist", "web")
 	path := r.URL.Path
 	if path == "/" || path == "" {
 		path = "/index.html"
 	}
-	full := filepath.Join(dir, filepath.Clean("/"+path))
-	// 防止越界
-	absDir, _ := filepath.Abs(dir)
-	absFile, _ := filepath.Abs(full)
-	if !strings.HasPrefix(absFile, absDir) {
-		http.NotFound(w, r)
-		return
-	}
-	if st, err := os.Stat(absFile); err != nil || st.IsDir() {
+	for _, dir := range dirs {
+		full := filepath.Join(dir, filepath.Clean("/"+path))
+		absDir, _ := filepath.Abs(dir)
+		absFile, _ := filepath.Abs(full)
+		if !strings.HasPrefix(strings.ToLower(absFile), strings.ToLower(absDir)) {
+			continue
+		}
+		if st, err := os.Stat(absFile); err == nil && !st.IsDir() {
+			http.ServeFile(w, r, absFile)
+			return
+		}
 		// SPA fallback
 		index := filepath.Join(dir, "index.html")
-		if _, err := os.Stat(index); err == nil {
+		if _, err := os.Stat(index); err == nil && (path == "/index.html" || !strings.Contains(path, ".")) {
 			http.ServeFile(w, r, index)
 			return
 		}
-		http.NotFound(w, r)
-		return
 	}
-	http.ServeFile(w, r, absFile)
+	http.NotFound(w, r)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

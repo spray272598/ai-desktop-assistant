@@ -1,41 +1,39 @@
 # AI Desktop Assistant
 
-基于 Go 的桌面 AI 助手，采用 DDD 分层 + 运行时智能体（ReAct）。
+基于 Go 的桌面 AI 助手：DDD + ReAct + MCP + React 控制台。
 
-## 能力（桌面智能助手核心）
+📚 **学习与秋招文档** → [`docs/README.md`](docs/README.md)
 
-| 优先级 | 能力 | 说明 |
-|--------|------|------|
-| P0 | **会话/消息 MySQL 持久化** | 跨重启对话、里程碑、长期记忆 |
-| P0 | **本地工具** | 工作区文件读写、安全命令执行 |
-| P0 | **真实 MCP** | stdio / SSE(HTTP) 客户端，工具自动注册进 Agent |
-| P0 | **运行时 Agent** | ReAct 循环、意图识别、混合窗口裁剪、动态 Prompt |
-| P1 | 截图 | 可选，默认关闭 |
+## 能力矩阵
 
-- **Agent Workflow**：Thought → Action → Observation，死循环检测、步数/工具预算
-- **意图识别**：规则优先 + LLM 降级，会话上下文追踪与缓存
-- **上下文管理**：ContextProvider + HybridReducer + CoreMemory
-- **HTTP + SSE**：`/api/v1/chat`、`/api/v1/chat/stream`
-- **Docker Compose**：assistant + MySQL
+| 级别 | 能力 |
+|------|------|
+| P0 | MySQL 会话持久化、本地文件/命令、MCP、ReAct、**浏览器自动化**、**React 控制台** |
+| P1 | Redis 缓存/限流、**代码沙箱**、**截图（kbinani）** |
+| P2 | 会话导入导出、WebSocket 设备、Wails 桌面壳骨架 |
+| P3 | MCP 插件市场、多 Agent 编排、模型 A/B 路由 |
+
+- Agent：意图 → Router/Planner → ReAct → 权限门 → 工具
+- 协议：HTTP / SSE / WebSocket
+- 部署：Docker Compose（MySQL + Redis + App）
 
 ## 快速开始
 
 ### 本机运行
 
 ```bash
-# 依赖
 go mod tidy
+go build -o mcp-demo.exe ./cmd/mcp-demo
 
-# Mock 模式（无需 API Key）
-go run ./cmd/server -config configs/config.yaml -mode http
+# React 控制台（推荐）
+cd web && npm i && npm run build && cd ..
 
-# 或 REPL
-go run ./cmd/server -mode repl
+# Mock 模式
+# PowerShell: $env:LLM_USE_MOCK="true"; $env:DB_TYPE="memory"
+go run ./cmd/server -config configs/config.yaml
 
-# 真实 LLM（SiliconFlow / OpenAI 兼容）
-set LLM_API_KEY=sk-xxx
-set LLM_USE_MOCK=false
-go run ./cmd/server
+# 真实 LLM
+# $env:LLM_API_KEY="sk-xxx"; $env:LLM_USE_MOCK="false"
 ```
 
 ### Docker 本地部署（含 MySQL）

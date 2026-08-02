@@ -1,5 +1,5 @@
 # build
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 WORKDIR /src
 RUN apk add --no-cache git ca-certificates
 COPY go.mod go.sum* ./
@@ -20,7 +20,8 @@ COPY --from=builder /out/mcp-demo /app/mcp-demo
 COPY configs/config.yaml /app/configs/config.yaml
 COPY docs/dev-ops/mysql/sql /app/docs/dev-ops/mysql/sql
 COPY web /app/web
-RUN mkdir -p /app/workspace /app/screenshots /app/logs /app/temp \
+# 若有构建产物则使用；无 Node 时仍可用 web 源码中的回退页
+RUN mkdir -p /app/workspace /app/screenshots /app/logs /app/temp /app/exports \
  && chmod +x /app/assistant /app/mcp-demo
 ENV SERVER_HOST=0.0.0.0
 ENV SERVER_PORT=8080

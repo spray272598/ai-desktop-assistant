@@ -17,6 +17,7 @@ import (
 	"github.com/ai-desktop/assistant/internal/domain/agent/service"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/intent"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/prompt"
+	"github.com/ai-desktop/assistant/internal/domain/agent/service/orchestrator"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/security"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/task"
 	"github.com/ai-desktop/assistant/internal/types/common"
@@ -37,6 +38,7 @@ type AgentEngine struct {
 	baseLoopConfig LoopConfig
 	breakdown      *task.BreakdownService
 	permGuard      *security.PermissionGuard
+	orchestrator   *orchestrator.MultiAgentOrchestrator
 }
 
 func NewAgentEngine(
@@ -71,6 +73,9 @@ func NewAgentEngine(
 func (e *AgentEngine) SetBreakdown(b *task.BreakdownService) { e.breakdown = b }
 func (e *AgentEngine) SetPermissionGuard(g *security.PermissionGuard) {
 	e.permGuard = g
+}
+func (e *AgentEngine) SetOrchestrator(o *orchestrator.MultiAgentOrchestrator) {
+	e.orchestrator = o
 }
 func (e *AgentEngine) PermissionGuard() *security.PermissionGuard { return e.permGuard }
 
@@ -118,22 +123,33 @@ func (e *AgentEngine) RunWithOptions(ctx context.Context, session *entity.Sessio
 		loopCfg.MaxRounds = e.agent.MaxSteps
 	}
 
-	// 2. 任务拆解
+	// 2. 多 Agent 编排（Router/Planner）+ 任务拆解
 	var plan *valobj.TaskPlan
-	if e.breakdown != nil {
-		// 用户说「继续」复用已有计划
+	var orchHint string
+	if e.orchestrator != nil && !isContinue(userInput) {
+		orch := e.orchestrator.Orchestrate(ctx, session.ID, userInput)
+		if orch != nil {
+			publish(&AgentEvent{
+				Type: EventRoute, Content: orch.Route, Data: orch,
+				Timestamp: time.Now().UnixMilli(),
+			})
+			plan = orch.Plan
+			orchHint = orch.FinalHint
+		}
+	}
+	if plan == nil && e.breakdown != nil {
 		if isContinue(userInput) {
 			plan = e.breakdown.GetPlan(session.ID)
 		} else {
 			plan = e.breakdown.Breakdown(ctx, session.ID, userInput)
 		}
-		if plan != nil && len(plan.SubTasks) > 0 {
-			publish(&AgentEvent{
-				Type: EventPlan, Content: plan.Summary, Data: plan,
-				Timestamp: time.Now().UnixMilli(),
-			})
-			e.milestones.AddMilestone(session.ID, valobj.NewMilestone(valobj.MilestoneTaskStart, "计划: "+plan.Summary, 0))
-		}
+	}
+	if plan != nil && len(plan.SubTasks) > 0 {
+		publish(&AgentEvent{
+			Type: EventPlan, Content: plan.Summary, Data: plan,
+			Timestamp: time.Now().UnixMilli(),
+		})
+		e.milestones.AddMilestone(session.ID, valobj.NewMilestone(valobj.MilestoneTaskStart, "计划: "+plan.Summary, 0))
 	}
 
 	// 3. 里程碑
@@ -172,6 +188,9 @@ func (e *AgentEngine) RunWithOptions(ctx context.Context, session *entity.Sessio
 	}
 
 	systemPrompt := e.promptService.BuildSystemPrompt(pctx)
+	if orchHint != "" {
+		systemPrompt += "\n## 多 Agent 编排提示\n" + orchHint + "\n"
+	}
 	if plan != nil {
 		systemPrompt += "\n## 执行计划\n请按下列子任务顺序推进，每步完成后简要标记进度：\n" + plan.StringForPrompt()
 	}

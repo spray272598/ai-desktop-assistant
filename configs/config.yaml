@@ -5,7 +5,7 @@ server:
 
 agent:
   name: "AI Desktop Assistant"
-  version: "1.0.0"
+  version: "1.1.0"
   max_steps: 15
   timeout: 120
   token_budget: 16000
@@ -16,13 +16,25 @@ llm:
   api_key: ""
   api_base: "https://api.siliconflow.cn/v1"
   use_mock: false
+  models:
+    fast:
+      model: "deepseek-ai/DeepSeek-V3"
+      weight: 2
+      scenarios: ["chat", "file", "command", "browser"]
+    strong:
+      model: "deepseek-ai/DeepSeek-V3"
+      weight: 1
+      scenarios: ["complex", "code"]
+    default:
+      model: "deepseek-ai/DeepSeek-V3"
+      weight: 1
+      scenarios: ["chat"]
 
 desktop:
   workspace: "./workspace"
   temp_dir: "./temp"
   screenshot_dir: "./screenshots"
 
-# 持久化：mysql（推荐）| memory（无库降级）
 database:
   type: "mysql"
   auto_migrate: true
@@ -36,8 +48,19 @@ database:
 
 redis:
   enabled: false
-  host: "redis"
+  host: "127.0.0.1"
   port: 6379
+  password: ""
+  db: 0
+
+rate_limit:
+  enabled: true
+  per_minute: 60
+
+sandbox:
+  enabled: true
+  use_docker: true
+  work_dir: "./temp/sandbox"
 
 logging:
   level: "info"
@@ -51,39 +74,22 @@ tools:
     enabled: true
     max_timeout: 60
     deny_list:
-      - "rm -rf /"
-      - "format"
-      - "mkfs"
-      - "shutdown"
-      - "reboot"
-      - "del /f /s /q"
+      - "(?i)\\brm\\s+-rf?\\s+/?(\\s|$)"
+      - "(?i)\\b(shutdown|reboot)\\b"
+      - "(?i)\\bformat\\b"
   screenshot:
-    enabled: false
+    enabled: true
     save_dir: "./screenshots"
   browser:
-    enabled: false
+    enabled: true
+  sandbox:
+    enabled: true
 
-# MCP：桌面助手扩展工具的主通道
 mcp:
   enabled: true
   servers:
-    # 内置 demo 服务（stdio），bootstrap 会自动解析 command 为 mcp-demo 可执行文件
     - name: demo
       transport: stdio
-      command: ""          # 留空则自动查找 ./mcp-demo 或 go run 构建产物
-      args: []
+      command: ""
       timeout_sec: 30
       enabled: true
-    # 示例：远程 SSE MCP
-    # - name: remote-search
-    #   transport: sse
-    #   url: "https://example.com/mcp/sse"
-    #   timeout_sec: 60
-    #   enabled: false
-    # 示例：npx filesystem MCP
-    # - name: fs
-    #   transport: stdio
-    #   command: "npx"
-    #   args: ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"]
-    #   timeout_sec: 60
-    #   enabled: false

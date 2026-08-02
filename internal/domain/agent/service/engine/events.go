@@ -15,6 +15,7 @@ const (
 	EventIntent      EventType = "intent"
 	EventPlan        EventType = "plan"
 	EventPermission  EventType = "permission"
+	EventRoute       EventType = "route"
 )
 
 // AgentEvent 引擎事件（SSE 推送）

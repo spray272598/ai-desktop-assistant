@@ -18,6 +18,12 @@
 !/screenshots/.gitkeep
 /logs/*
 /temp/*
+/exports/*
+
+# frontend
+web/node_modules/
+# 保留构建产物方便无 npm 环境部署（可选）
+# web/dist/
 
 # ide
 .idea/
