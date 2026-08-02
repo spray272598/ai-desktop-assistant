@@ -11,17 +11,21 @@ import (
 	"github.com/ai-desktop/assistant/internal/domain/agent/adapter/repository"
 	"github.com/ai-desktop/assistant/internal/domain/agent/model/entity"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/engine"
+	"github.com/ai-desktop/assistant/internal/domain/agent/service/security"
+	mcpsvc "github.com/ai-desktop/assistant/internal/domain/mcp/service"
 	"github.com/ai-desktop/assistant/internal/types/common"
 )
 
-// AgentApp 应用服务：会话 + 对话用例
+// AgentApp 应用服务
 type AgentApp struct {
-	engine      *engine.AgentEngine
-	sessionRepo repository.ISessionRepository
-	messageRepo repository.IMessageRepository
+	engine         *engine.AgentEngine
+	sessionRepo    repository.ISessionRepository
+	messageRepo    repository.IMessageRepository
+	mcpService     *mcpsvc.MCPService
+	permGuard      *security.PermissionGuard
 	defaultAgentID string
-	timeoutSec  int
-	workDir     string
+	timeoutSec     int
+	workDir        string
 }
 
 func NewAgentApp(
@@ -43,6 +47,19 @@ func NewAgentApp(
 		timeoutSec:     timeoutSec,
 		workDir:        workDir,
 	}
+}
+
+func (app *AgentApp) SetMCPService(s *mcpsvc.MCPService)          { app.mcpService = s }
+func (app *AgentApp) SetPermissionGuard(g *security.PermissionGuard) { app.permGuard = g }
+func (app *AgentApp) MCPService() *mcpsvc.MCPService              { return app.mcpService }
+func (app *AgentApp) PermissionGuard() *security.PermissionGuard {
+	if app.permGuard != nil {
+		return app.permGuard
+	}
+	if app.engine != nil {
+		return app.engine.PermissionGuard()
+	}
+	return nil
 }
 
 func (app *AgentApp) CreateSession(req dto.CreateSessionRequest) *dto.CreateSessionResponse {
@@ -75,7 +92,14 @@ func (app *AgentApp) Chat(req dto.ChatRequest) (*dto.ChatResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(app.timeoutSec)*time.Second)
 	defer cancel()
 
-	result, err := app.engine.Run(ctx, session, req.Message, nil)
+	autoApprove := req.AutoApprove
+	if !autoApprove && req.Params != nil {
+		if v, ok := req.Params["autoApprove"].(bool); ok {
+			autoApprove = v
+		}
+	}
+
+	result, err := app.engine.RunWithOptions(ctx, session, req.Message, nil, engine.RunOptions{AutoApprove: autoApprove})
 	if err != nil && result == nil {
 		return nil, err
 	}
@@ -84,16 +108,18 @@ func (app *AgentApp) Chat(req dto.ChatRequest) (*dto.ChatResponse, error) {
 	}
 
 	return &dto.ChatResponse{
-		SessionID: result.SessionID,
-		Response:  result.Response,
-		Intent:    result.Intent,
-		ToolCalls: result.ToolCalls,
-		Steps:     result.Steps,
-		TokenUsed: result.TokenUsed,
+		SessionID:         result.SessionID,
+		Response:          result.Response,
+		Intent:            result.Intent,
+		ToolCalls:         result.ToolCalls,
+		Steps:             result.Steps,
+		TokenUsed:         result.TokenUsed,
+		TaskPlan:          result.TaskPlan,
+		NeedPermission:    result.NeedPermission,
+		PendingPermission: result.PendingPermission,
 	}, nil
 }
 
-// ChatStream 流式对话，返回事件 channel（调用方负责读取直到 completed）
 func (app *AgentApp) ChatStream(req dto.ChatRequest) (<-chan dto.ChatStreamEvent, error) {
 	session, err := app.resolveSession(req)
 	if err != nil {
@@ -116,7 +142,6 @@ func (app *AgentApp) ChatStream(req dto.ChatRequest) (<-chan dto.ChatStreamEvent
 				Timestamp: ev.Timestamp,
 			}
 			if ev.Completed {
-				// 排空剩余
 				for remaining := range eventCh {
 					out <- dto.ChatStreamEvent{
 						Type: string(remaining.Type), SubType: remaining.SubType,
@@ -134,7 +159,8 @@ func (app *AgentApp) ChatStream(req dto.ChatRequest) (<-chan dto.ChatStreamEvent
 		defer close(eventCh)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(app.timeoutSec)*time.Second)
 		defer cancel()
-		_, err := app.engine.Run(ctx, session, req.Message, eventCh)
+		autoApprove := req.AutoApprove
+		_, err := app.engine.RunWithOptions(ctx, session, req.Message, eventCh, engine.RunOptions{AutoApprove: autoApprove})
 		if err != nil {
 			select {
 			case eventCh <- &engine.AgentEvent{
@@ -169,6 +195,10 @@ func (app *AgentApp) ListSessionsByUser(userID string) ([]*dto.SessionInfo, erro
 	return out, nil
 }
 
+func (app *AgentApp) ListMessages(sessionID string, limit int) ([]map[string]interface{}, error) {
+	return app.messageRepo.ListAsMaps(context.Background(), sessionID, limit)
+}
+
 func toSessionInfo(session *entity.SessionEntity) *dto.SessionInfo {
 	if session == nil {
 		return nil
@@ -184,10 +214,6 @@ func toSessionInfo(session *entity.SessionEntity) *dto.SessionInfo {
 	}
 }
 
-func (app *AgentApp) ListMessages(sessionID string, limit int) ([]map[string]interface{}, error) {
-	return app.messageRepo.ListAsMaps(context.Background(), sessionID, limit)
-}
-
 func (app *AgentApp) resolveSession(req dto.ChatRequest) (*entity.SessionEntity, error) {
 	if req.SessionID != "" {
 		s, err := app.sessionRepo.FindByID(context.Background(), req.SessionID)
@@ -198,7 +224,6 @@ func (app *AgentApp) resolveSession(req dto.ChatRequest) (*entity.SessionEntity,
 			return s, nil
 		}
 	}
-	// 自动创建
 	agentID := req.AgentID
 	if agentID == "" {
 		agentID = app.defaultAgentID

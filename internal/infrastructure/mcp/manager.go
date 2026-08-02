@@ -6,55 +6,189 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ai-desktop/assistant/internal/domain/mcp/adapter/port"
 	"github.com/ai-desktop/assistant/internal/domain/mcp/model/entity"
 )
 
-// Manager 管理多个 MCP 客户端
+// ToolsChangedCallback 工具变更回调（用于同步 Agent ToolRegistry）
+type ToolsChangedCallback func(tools []entity.ToolDef)
+
+// Manager 管理多个 MCP 客户端，支持热增删
 type Manager struct {
-	mu      sync.RWMutex
-	clients map[string]port.IMCPClient
-	configs []entity.ServerConfig
-	// toolName -> serverName（同名冲突时加前缀 server__tool）
+	mu        sync.RWMutex
+	clients   map[string]port.IMCPClient
+	configs   map[string]entity.ServerConfig
 	toolRoute map[string]string
 	toolDefs  []entity.ToolDef
+	onChange  ToolsChangedCallback
 }
 
 func NewManager(configs []entity.ServerConfig) *Manager {
-	return &Manager{
+	m := &Manager{
 		clients:   make(map[string]port.IMCPClient),
-		configs:   configs,
+		configs:   make(map[string]entity.ServerConfig),
 		toolRoute: make(map[string]string),
 	}
+	for _, c := range configs {
+		m.configs[c.Name] = c
+	}
+	return m
+}
+
+func (m *Manager) OnToolsChanged(cb ToolsChangedCallback) {
+	m.mu.Lock()
+	m.onChange = cb
+	m.mu.Unlock()
 }
 
 func (m *Manager) Start(ctx context.Context) error {
-	for _, cfg := range m.configs {
+	m.mu.RLock()
+	cfgs := make([]entity.ServerConfig, 0, len(m.configs))
+	for _, c := range m.configs {
+		cfgs = append(cfgs, c)
+	}
+	m.mu.RUnlock()
+
+	for _, cfg := range cfgs {
 		if !cfg.Enabled {
 			continue
 		}
-		var client port.IMCPClient
-		switch strings.ToLower(cfg.Transport) {
-		case "stdio":
-			client = NewStdioClient(cfg)
-		case "sse", "http", "streamable":
-			client = NewSSEClient(cfg)
-		default:
-			log.Printf("[mcp] unknown transport %s for %s, skip\n", cfg.Transport, cfg.Name)
-			continue
-		}
-		if err := client.Initialize(ctx); err != nil {
+		if err := m.startOne(ctx, cfg); err != nil {
 			log.Printf("[mcp] init %s failed: %v (continue)\n", cfg.Name, err)
-			_ = client.Close()
-			continue
 		}
-		m.mu.Lock()
-		m.clients[cfg.Name] = client
-		m.mu.Unlock()
 	}
 	_, err := m.refreshTools(ctx)
 	return err
+}
+
+func (m *Manager) startOne(ctx context.Context, cfg entity.ServerConfig) error {
+	m.mu.Lock()
+	if old, ok := m.clients[cfg.Name]; ok {
+		_ = old.Close()
+		delete(m.clients, cfg.Name)
+	}
+	m.mu.Unlock()
+
+	var client port.IMCPClient
+	switch strings.ToLower(cfg.Transport) {
+	case "stdio":
+		client = NewStdioClient(cfg)
+	case "sse", "http", "streamable":
+		client = NewSSEClient(cfg)
+	default:
+		return fmt.Errorf("unknown transport %s", cfg.Transport)
+	}
+	if err := client.Initialize(ctx); err != nil {
+		_ = client.Close()
+		return err
+	}
+	m.mu.Lock()
+	m.clients[cfg.Name] = client
+	m.configs[cfg.Name] = cfg
+	m.mu.Unlock()
+	return nil
+}
+
+// AddOrUpdate 热加载：新增或更新并立即连接
+func (m *Manager) AddOrUpdate(ctx context.Context, cfg entity.ServerConfig) error {
+	if cfg.Name == "" {
+		return fmt.Errorf("mcp server name required")
+	}
+	if cfg.TimeoutSec <= 0 {
+		cfg.TimeoutSec = 60
+	}
+	m.mu.Lock()
+	m.configs[cfg.Name] = cfg
+	m.mu.Unlock()
+
+	if !cfg.Enabled {
+		return m.Remove(cfg.Name)
+	}
+	if err := m.startOne(ctx, cfg); err != nil {
+		return err
+	}
+	_, err := m.refreshTools(ctx)
+	return err
+}
+
+// Remove 热卸载
+func (m *Manager) Remove(name string) error {
+	m.mu.Lock()
+	if c, ok := m.clients[name]; ok {
+		_ = c.Close()
+		delete(m.clients, name)
+	}
+	delete(m.configs, name)
+	m.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := m.refreshTools(ctx)
+	return err
+}
+
+// ReloadAll 按配置列表全量重载
+func (m *Manager) ReloadAll(ctx context.Context, configs []entity.ServerConfig) error {
+	// 关闭不在新列表中的
+	wanted := map[string]bool{}
+	for _, c := range configs {
+		wanted[c.Name] = true
+	}
+	m.mu.RLock()
+	var toRemove []string
+	for name := range m.clients {
+		if !wanted[name] {
+			toRemove = append(toRemove, name)
+		}
+	}
+	m.mu.RUnlock()
+	for _, name := range toRemove {
+		_ = m.Remove(name)
+	}
+	for _, cfg := range configs {
+		m.mu.Lock()
+		m.configs[cfg.Name] = cfg
+		m.mu.Unlock()
+		if !cfg.Enabled {
+			// 确保关闭
+			m.mu.Lock()
+			if c, ok := m.clients[cfg.Name]; ok {
+				_ = c.Close()
+				delete(m.clients, cfg.Name)
+			}
+			m.mu.Unlock()
+			continue
+		}
+		if err := m.startOne(ctx, cfg); err != nil {
+			log.Printf("[mcp] reload %s: %v\n", cfg.Name, err)
+		}
+	}
+	_, err := m.refreshTools(ctx)
+	return err
+}
+
+func (m *Manager) ListServers() []entity.ServerConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]entity.ServerConfig, 0, len(m.configs))
+	for _, c := range m.configs {
+		// 标注是否在线
+		cp := c
+		if _, ok := m.clients[c.Name]; ok {
+			// use metadata in name? keep as is, Enabled means configured
+			_ = ok
+		}
+		out = append(out, cp)
+	}
+	return out
+}
+
+func (m *Manager) IsOnline(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.clients[name]
+	return ok
 }
 
 func (m *Manager) refreshTools(ctx context.Context) ([]entity.ToolDef, error) {
@@ -63,12 +197,18 @@ func (m *Manager) refreshTools(ctx context.Context) ([]entity.ToolDef, error) {
 	for _, c := range m.clients {
 		clients = append(clients, c)
 	}
+	cb := m.onChange
 	m.mu.RUnlock()
 
 	route := make(map[string]string)
 	var defs []entity.ToolDef
 	nameCount := map[string]int{}
 
+	type toolPair struct {
+		client port.IMCPClient
+		tools  []entity.ToolDef
+	}
+	var pairs []toolPair
 	for _, c := range clients {
 		tools, err := c.ListTools(ctx)
 		if err != nil {
@@ -78,25 +218,20 @@ func (m *Manager) refreshTools(ctx context.Context) ([]entity.ToolDef, error) {
 		for _, t := range tools {
 			nameCount[t.Name]++
 		}
+		pairs = append(pairs, toolPair{client: c, tools: tools})
 	}
-	// 二次遍历，冲突则加前缀
-	for _, c := range clients {
-		tools, err := c.ListTools(ctx)
-		if err != nil {
-			continue
-		}
-		for _, t := range tools {
+	for _, p := range pairs {
+		for _, t := range p.tools {
 			name := t.Name
 			if nameCount[t.Name] > 1 {
-				name = c.Name() + "__" + t.Name
+				name = p.client.Name() + "__" + t.Name
 			}
-			// 注册路由：对外名 -> 服务内真实名 存 server
-			route[name] = c.Name() + "\x00" + t.Name
+			route[name] = p.client.Name() + "\x00" + t.Name
 			td := t
 			td.Name = name
-			td.ServerName = c.Name()
+			td.ServerName = p.client.Name()
 			if name != t.Name {
-				td.Description = fmt.Sprintf("[%s] %s", c.Name(), t.Description)
+				td.Description = fmt.Sprintf("[%s] %s", p.client.Name(), t.Description)
 			}
 			defs = append(defs, td)
 		}
@@ -105,6 +240,10 @@ func (m *Manager) refreshTools(ctx context.Context) ([]entity.ToolDef, error) {
 	m.toolRoute = route
 	m.toolDefs = defs
 	m.mu.Unlock()
+
+	if cb != nil {
+		cb(defs)
+	}
 	return defs, nil
 }
 
@@ -124,10 +263,8 @@ func (m *Manager) CallTool(ctx context.Context, name string, args map[string]int
 	route, ok := m.toolRoute[name]
 	m.mu.RUnlock()
 	if !ok {
-		// 尝试直接按 server 内名称
 		m.mu.RLock()
 		for _, c := range m.clients {
-			// 尝试调用
 			m.mu.RUnlock()
 			if text, err := c.CallTool(ctx, name, args); err == nil {
 				return text, nil

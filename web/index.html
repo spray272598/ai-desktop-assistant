@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Desktop Assistant</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --panel2: #243044;
+      --border: #2d3a4f;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --accent: #3b82f6;
+      --accent2: #22c55e;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --radius: 10px;
+      --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: var(--font); background: var(--bg); color: var(--text);
+      height: 100vh; display: flex; flex-direction: column;
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 18px; border-bottom: 1px solid var(--border); background: var(--panel);
+    }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+    header .meta { color: var(--muted); font-size: 12px; }
+    .layout {
+      flex: 1; display: grid; grid-template-columns: 240px 1fr 280px; min-height: 0;
+    }
+    aside, main, .right {
+      border-right: 1px solid var(--border); min-height: 0; display: flex; flex-direction: column;
+    }
+    .right { border-right: none; border-left: 1px solid var(--border); }
+    .panel-title {
+      padding: 12px 14px; font-size: 12px; text-transform: uppercase; letter-spacing: .8px;
+      color: var(--muted); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;
+    }
+    .list { overflow: auto; flex: 1; padding: 8px; }
+    .item {
+      padding: 10px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 4px;
+      border: 1px solid transparent;
+    }
+    .item:hover { background: var(--panel2); }
+    .item.active { background: #1e3a5f; border-color: #2563eb55; }
+    .item .t { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .item .s { font-size: 11px; color: var(--muted); margin-top: 3px; }
+    .btn {
+      background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+      padding: 6px 10px; font-size: 12px; cursor: pointer;
+    }
+    .btn:hover { filter: brightness(1.08); }
+    .btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+    .btn.warn { background: var(--warn); color: #111; }
+    .btn.danger { background: var(--danger); }
+    .btn.ok { background: var(--accent2); color: #062; }
+    .btn.sm { padding: 4px 8px; font-size: 11px; }
+    .chat {
+      flex: 1; overflow: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px;
+    }
+    .bubble {
+      max-width: 85%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .bubble.user { align-self: flex-end; background: #1d4ed8; }
+    .bubble.bot { align-self: flex-start; background: var(--panel2); border: 1px solid var(--border); }
+    .bubble.sys { align-self: center; background: transparent; color: var(--muted); font-size: 12px; border: 1px dashed var(--border); }
+    .bubble.perm { align-self: stretch; background: #422006; border: 1px solid #f59e0b55; }
+    .composer {
+      border-top: 1px solid var(--border); padding: 12px; display: flex; gap: 8px; background: var(--panel);
+    }
+    .composer textarea {
+      flex: 1; resize: none; height: 64px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); padding: 10px; font-family: inherit; font-size: 14px;
+    }
+    .composer .actions { display: flex; flex-direction: column; gap: 6px; }
+    .tool-chip {
+      display: block; padding: 8px 10px; margin-bottom: 6px; border-radius: 8px;
+      background: var(--panel2); border: 1px solid var(--border); font-size: 12px;
+    }
+    .tool-chip b { color: #93c5fd; }
+    .tool-chip span { color: var(--muted); display: block; margin-top: 2px; }
+    .mcp-form { padding: 8px; display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--border); }
+    .mcp-form input, .mcp-form select {
+      background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      border-radius: 6px; padding: 6px 8px; font-size: 12px;
+    }
+    .tag { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 999px; background: #164e63; color: #a5f3fc; }
+    .tag.off { background: #3f3f46; color: #a1a1aa; }
+    .tag.on { background: #14532d; color: #86efac; }
+    label.chk { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
+    @media (max-width: 960px) {
+      .layout { grid-template-columns: 1fr; }
+      aside, .right { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🖥️ AI Desktop Assistant</h1>
+    <div class="meta">
+      user: <b id="userIdLabel">desktop-user</b> ·
+      session: <span id="sessionLabel">-</span> ·
+      <span id="health">…</span>
+    </div>
+  </header>
+  <div class="layout">
+    <aside>
+      <div class="panel-title">
+        <span>会话</span>
+        <button class="btn sm" id="btnNewSession">新建</button>
+      </div>
+      <div class="list" id="sessionList"></div>
+    </aside>
+    <main>
+      <div class="panel-title">
+        <span>对话</span>
+        <label class="chk"><input type="checkbox" id="autoApprove" /> 自动批准（开发）</label>
+      </div>
+      <div class="chat" id="chat"></div>
+      <div class="composer">
+        <textarea id="input" placeholder="输入指令，例如：列出文件 / 先创建 demo.txt 再执行 echo hello"></textarea>
+        <div class="actions">
+          <button class="btn" id="btnSend">发送</button>
+          <button class="btn ghost" id="btnContinue">继续</button>
+        </div>
+      </div>
+    </main>
+    <div class="right">
+      <div class="panel-title"><span>工具面板</span><button class="btn sm ghost" id="btnRefreshTools">刷新</button></div>
+      <div class="list" id="toolList" style="max-height:40%"></div>
+      <div class="panel-title"><span>MCP 服务</span><button class="btn sm ghost" id="btnReloadMcp">热加载</button></div>
+      <div class="list" id="mcpList" style="max-height:30%"></div>
+      <div class="mcp-form">
+        <input id="mcpName" placeholder="name" />
+        <select id="mcpTransport"><option value="stdio">stdio</option><option value="sse">sse</option></select>
+        <input id="mcpCommand" placeholder="command 或 url" />
+        <button class="btn sm" id="btnAddMcp">添加/更新 MCP</button>
+      </div>
+      <div class="panel-title"><span>待确认权限</span></div>
+      <div class="list" id="permList"></div>
+    </div>
+  </div>
+
+  <script>
+    const API = '';
+    const state = {
+      userId: 'desktop-user',
+      sessionId: localStorage.getItem('ada_session') || '',
+      messages: [],
+      pendingPerm: null,
+    };
+
+    const $ = (id) => document.getElementById(id);
+    const chatEl = $('chat');
+
+    function addBubble(role, text, cls) {
+      const d = document.createElement('div');
+      d.className = 'bubble ' + (cls || role);
+      d.textContent = text;
+      chatEl.appendChild(d);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch(API + path, {
+        headers: { 'Content-Type': 'application/json' },
+        ...opts,
+      });
+      const data = await res.json();
+      if (data.code && data.code !== '0000') throw new Error(data.message || 'api error');
+      return data.data;
+    }
+
+    async function ensureSession() {
+      if (state.sessionId) {
+        try {
+          const info = await api('/api/v1/session/info?sessionId=' + encodeURIComponent(state.sessionId));
+          if (info) {
+            $('sessionLabel').textContent = state.sessionId.slice(0, 18) + '…';
+            return;
+          }
+        } catch (_) {}
+      }
+      const s = await api('/api/v1/session/create', {
+        method: 'POST',
+        body: JSON.stringify({ userId: state.userId, title: 'Web 会话' }),
+      });
+      state.sessionId = s.sessionId;
+      localStorage.setItem('ada_session', state.sessionId);
+      $('sessionLabel').textContent = state.sessionId.slice(0, 18) + '…';
+    }
+
+    async function loadSessions() {
+      const list = await api('/api/v1/session/list?userId=' + encodeURIComponent(state.userId));
+      const el = $('sessionList');
+      el.innerHTML = '';
+      (list || []).forEach(s => {
+        const d = document.createElement('div');
+        d.className = 'item' + (s.sessionId === state.sessionId ? ' active' : '');
+        d.innerHTML = `<div class="t">${s.title || s.sessionId}</div><div class="s">${s.messageCount || 0} msgs · ${s.status}</div>`;
+        d.onclick = async () => {
+          state.sessionId = s.sessionId;
+          localStorage.setItem('ada_session', state.sessionId);
+          $('sessionLabel').textContent = state.sessionId.slice(0, 18) + '…';
+          await loadHistory();
+          loadSessions();
+        };
+        el.appendChild(d);
+      });
+    }
+
+    async function loadHistory() {
+      chatEl.innerHTML = '';
+      if (!state.sessionId) return;
+      try {
+        const msgs = await api('/api/v1/session/messages?sessionId=' + encodeURIComponent(state.sessionId));
+        (msgs || []).forEach(m => {
+          const role = m.role === 'user' ? 'user' : 'bot';
+          if (m.role === 'tool') addBubble('sys', `[tool:${m.toolName || ''}] ${m.content}`, 'sys');
+          else addBubble(role, m.content);
+        });
+      } catch (e) {
+        addBubble('sys', '历史加载失败: ' + e.message, 'sys');
+      }
+    }
+
+    async function loadTools() {
+      const tools = await api('/api/v1/tools');
+      const el = $('toolList');
+      el.innerHTML = '';
+      (tools || []).forEach(t => {
+        const d = document.createElement('div');
+        d.className = 'tool-chip';
+        d.innerHTML = `<b>${t.name}</b><span>${t.description || ''}</span>`;
+        el.appendChild(d);
+      });
+    }
+
+    async function loadMCP() {
+      const list = await api('/api/v1/mcp/servers');
+      const el = $('mcpList');
+      el.innerHTML = '';
+      (list || []).forEach(s => {
+        const d = document.createElement('div');
+        d.className = 'tool-chip';
+        const tag = s.online ? '<span class="tag on">online</span>' : '<span class="tag off">offline</span>';
+        d.innerHTML = `<b>${s.name}</b> ${tag}<span>${s.transport} · ${s.command || s.url || ''}</span>
+          <button class="btn sm danger" style="margin-top:6px" data-name="${s.name}">删除</button>`;
+        d.querySelector('button').onclick = async (ev) => {
+          ev.stopPropagation();
+          await api('/api/v1/mcp/servers/delete?name=' + encodeURIComponent(s.name), { method: 'POST' });
+          loadMCP(); loadTools();
+        };
+        el.appendChild(d);
+      });
+    }
+
+    async function loadPerms() {
+      const list = await api('/api/v1/permission/pending?sessionId=' + encodeURIComponent(state.sessionId || ''));
+      const el = $('permList');
+      el.innerHTML = '';
+      (list || []).forEach(p => {
+        const d = document.createElement('div');
+        d.className = 'tool-chip';
+        d.innerHTML = `<b>${p.tool}</b><span>${p.reason || ''}</span>
+          <div style="margin-top:6px;display:flex;gap:6px">
+            <button class="btn sm ok" data-act="once">批准一次</button>
+            <button class="btn sm warn" data-act="session">本会话</button>
+            <button class="btn sm danger" data-act="reject">拒绝</button>
+          </div>`;
+        d.querySelectorAll('button').forEach(btn => {
+          btn.onclick = async () => {
+            const act = btn.dataset.act;
+            if (act === 'reject') {
+              await api('/api/v1/permission/reject', { method: 'POST', body: JSON.stringify({ id: p.id }) });
+            } else {
+              await api('/api/v1/permission/approve', { method: 'POST', body: JSON.stringify({ id: p.id, scope: act }) });
+              addBubble('sys', '已批准 ' + p.tool + '，可点「继续」或重发指令', 'sys');
+            }
+            loadPerms();
+          };
+        });
+        el.appendChild(d);
+      });
+    }
+
+    async function sendMessage(text) {
+      if (!text.trim()) return;
+      await ensureSession();
+      addBubble('user', text);
+      $('input').value = '';
+      try {
+        const data = await api('/api/v1/chat', {
+          method: 'POST',
+          body: JSON.stringify({
+            sessionId: state.sessionId,
+            userId: state.userId,
+            message: text,
+            autoApprove: $('autoApprove').checked,
+          }),
+        });
+        addBubble('bot', data.response || '(empty)');
+        if (data.taskPlan && data.taskPlan.subTasks) {
+          const planText = '📋 计划: ' + (data.taskPlan.summary || '') + '\n' +
+            data.taskPlan.subTasks.map(t => `  ${t.index}. [${t.status}] ${t.title}`).join('\n');
+          addBubble('sys', planText, 'sys');
+        }
+        if (data.needPermission && data.pendingPermission) {
+          state.pendingPerm = data.pendingPermission;
+          addBubble('perm', '需要确认: ' + data.pendingPermission.tool + ' — ' + data.pendingPermission.reason + '\nID: ' + data.pendingPermission.id, 'perm');
+        }
+        loadSessions();
+        loadPerms();
+      } catch (e) {
+        addBubble('sys', '错误: ' + e.message, 'sys');
+      }
+    }
+
+    $('btnSend').onclick = () => sendMessage($('input').value);
+    $('btnContinue').onclick = () => sendMessage('继续');
+    $('input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage($('input').value); }
+    });
+    $('btnNewSession').onclick = async () => {
+      localStorage.removeItem('ada_session');
+      state.sessionId = '';
+      await ensureSession();
+      chatEl.innerHTML = '';
+      addBubble('sys', '新会话已创建', 'sys');
+      loadSessions();
+    };
+    $('btnRefreshTools').onclick = loadTools;
+    $('btnReloadMcp').onclick = async () => {
+      try {
+        await api('/api/v1/mcp/reload', { method: 'POST' });
+        addBubble('sys', 'MCP 已从 DB 热加载', 'sys');
+      } catch (e) {
+        addBubble('sys', '热加载: ' + e.message, 'sys');
+      }
+      loadMCP(); loadTools();
+    };
+    $('btnAddMcp').onclick = async () => {
+      const name = $('mcpName').value.trim();
+      const transport = $('mcpTransport').value;
+      const cmdOrUrl = $('mcpCommand').value.trim();
+      if (!name || !cmdOrUrl) return alert('name 与 command/url 必填');
+      const body = { name, transport, enabled: true, timeoutSec: 60 };
+      if (transport === 'stdio') body.command = cmdOrUrl;
+      else body.url = cmdOrUrl;
+      await api('/api/v1/mcp/servers', { method: 'POST', body: JSON.stringify(body) });
+      $('mcpName').value = ''; $('mcpCommand').value = '';
+      loadMCP(); loadTools();
+    };
+
+    (async function init() {
+      try {
+        const h = await api('/health');
+        $('health').textContent = 'online ' + (h.time || '');
+      } catch {
+        $('health').textContent = 'offline';
+      }
+      await ensureSession();
+      await Promise.all([loadSessions(), loadHistory(), loadTools(), loadMCP(), loadPerms()]);
+      addBubble('sys', '就绪。可试：list files · 创建并写入 test.txt · get_time（MCP）', 'sys');
+    })();
+  </script>
+</body>
+</html>

@@ -6,13 +6,15 @@ import "time"
 type EventType string
 
 const (
-	EventThought    EventType = "thought"
-	EventToolCall   EventType = "tool_call"
-	EventToolResult EventType = "tool_result"
-	EventAnswer     EventType = "answer"
-	EventError      EventType = "error"
-	EventComplete   EventType = "complete"
-	EventIntent     EventType = "intent"
+	EventThought     EventType = "thought"
+	EventToolCall    EventType = "tool_call"
+	EventToolResult  EventType = "tool_result"
+	EventAnswer      EventType = "answer"
+	EventError       EventType = "error"
+	EventComplete    EventType = "complete"
+	EventIntent      EventType = "intent"
+	EventPlan        EventType = "plan"
+	EventPermission  EventType = "permission"
 )
 
 // AgentEvent 引擎事件（SSE 推送）
@@ -35,12 +37,24 @@ func NewEvent(typ EventType, step int, content string) *AgentEvent {
 	}
 }
 
+// PendingPermissionInfo 返回给前端的待确认信息
+type PendingPermissionInfo struct {
+	ID     string                 `json:"id"`
+	Tool   string                 `json:"tool"`
+	Args   map[string]interface{} `json:"args,omitempty"`
+	Reason string                 `json:"reason"`
+	RuleID string                 `json:"ruleId,omitempty"`
+}
+
 // AgentResult 运行结果
 type AgentResult struct {
-	SessionID string
-	Response  string
-	Intent    string
-	Steps     int
-	TokenUsed int
-	ToolCalls int
+	SessionID          string
+	Response           string
+	Intent             string
+	Steps              int
+	TokenUsed          int
+	ToolCalls          int
+	TaskPlan           interface{} `json:"taskPlan,omitempty"`
+	PendingPermission  *PendingPermissionInfo
+	NeedPermission     bool
 }

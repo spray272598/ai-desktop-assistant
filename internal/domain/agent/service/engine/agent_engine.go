@@ -17,6 +17,8 @@ import (
 	"github.com/ai-desktop/assistant/internal/domain/agent/service"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/intent"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/prompt"
+	"github.com/ai-desktop/assistant/internal/domain/agent/service/security"
+	"github.com/ai-desktop/assistant/internal/domain/agent/service/task"
 	"github.com/ai-desktop/assistant/internal/types/enums"
 )
 
@@ -32,6 +34,8 @@ type AgentEngine struct {
 	sessionRepo    repository.ISessionRepository
 	messageRepo    repository.IMessageRepository
 	baseLoopConfig LoopConfig
+	breakdown      *task.BreakdownService
+	permGuard      *security.PermissionGuard
 }
 
 func NewAgentEngine(
@@ -63,8 +67,23 @@ func NewAgentEngine(
 	}
 }
 
+func (e *AgentEngine) SetBreakdown(b *task.BreakdownService) { e.breakdown = b }
+func (e *AgentEngine) SetPermissionGuard(g *security.PermissionGuard) {
+	e.permGuard = g
+}
+func (e *AgentEngine) PermissionGuard() *security.PermissionGuard { return e.permGuard }
+
+// RunOptions 运行选项
+type RunOptions struct {
+	AutoApprove bool
+}
+
 // Run 同步运行，可选 eventCh 推送事件
 func (e *AgentEngine) Run(ctx context.Context, session *entity.SessionEntity, userInput string, eventCh chan<- *AgentEvent) (*AgentResult, error) {
+	return e.RunWithOptions(ctx, session, userInput, eventCh, RunOptions{})
+}
+
+func (e *AgentEngine) RunWithOptions(ctx context.Context, session *entity.SessionEntity, userInput string, eventCh chan<- *AgentEvent, opts RunOptions) (*AgentResult, error) {
 	if session == nil {
 		return nil, fmt.Errorf("session is nil")
 	}
@@ -98,22 +117,40 @@ func (e *AgentEngine) Run(ctx context.Context, session *entity.SessionEntity, us
 		loopCfg.MaxRounds = e.agent.MaxSteps
 	}
 
-	// 2. 里程碑
-	e.milestones.DetectAndRecord(session.ID, "user", userInput, 0)
+	// 2. 任务拆解
+	var plan *valobj.TaskPlan
+	if e.breakdown != nil {
+		// 用户说「继续」复用已有计划
+		if isContinue(userInput) {
+			plan = e.breakdown.GetPlan(session.ID)
+		} else {
+			plan = e.breakdown.Breakdown(ctx, session.ID, userInput)
+		}
+		if plan != nil && len(plan.SubTasks) > 0 {
+			publish(&AgentEvent{
+				Type: EventPlan, Content: plan.Summary, Data: plan,
+				Timestamp: time.Now().UnixMilli(),
+			})
+			e.milestones.AddMilestone(session.ID, valobj.NewMilestone(valobj.MilestoneTaskStart, "计划: "+plan.Summary, 0))
+		}
+	}
+
+	// 3. 里程碑
+	e.milestones.DetectAndRecordWithUser(session.ID, session.UserID, "user", userInput, 0)
 	e.milestones.AddMilestone(session.ID, valobj.NewMilestone(valobj.MilestoneTaskStart, userInput, 0))
 	if e.chatContext != nil {
 		e.chatContext.SetTask(session.ID, userInput)
 	}
 
-	// 3. 加载并裁剪历史
+	// 4. 历史裁剪
 	historyMaps, _ := e.messageRepo.ListAsMaps(ctx, session.ID, 100)
 	if e.chatContext != nil {
 		historyMaps = e.chatContext.TrimHistory(historyMaps, loopCfg.MaxTokenBudget/2)
 	}
 
-	// 4. 构建 Prompt 上下文
+	// 5. Prompt 上下文
 	workDir := session.WorkingDir
-	if workDir == "" && e.agent != nil {
+	if workDir == "" {
 		workDir = "./workspace"
 	}
 	var pctx *valobj.PromptContextVO
@@ -129,16 +166,22 @@ func (e *AgentEngine) Run(ctx context.Context, session *entity.SessionEntity, us
 	pctx.Milestones = e.milestones.GetMilestones(session.ID)
 	pctx.SetTools(e.toolInfos())
 	pctx.UserInput = userInput
+	if plan != nil {
+		pctx.TaskDescription = plan.StringForPrompt()
+	}
 
 	systemPrompt := e.promptService.BuildSystemPrompt(pctx)
+	if plan != nil {
+		systemPrompt += "\n## 执行计划\n请按下列子任务顺序推进，每步完成后简要标记进度：\n" + plan.StringForPrompt()
+	}
 	userPrompt := e.promptService.BuildUserPrompt(userInput, pctx)
 
-	// 5. 持久化用户消息
+	// 6. 持久化用户消息
 	userMsg := entity.NewUserMessage(session.ID, userInput)
 	_ = e.messageRepo.Save(ctx, userMsg)
 	session.AddMessage(0)
 
-	// 6. 组装 LLM 消息
+	// 7. 组装 LLM 消息
 	messages := make([]port.ChatMessage, 0, len(historyMaps)+8)
 	for _, m := range historyMaps {
 		role, _ := m["role"].(string)
@@ -152,12 +195,13 @@ func (e *AgentEngine) Run(ctx context.Context, session *entity.SessionEntity, us
 
 	publish(NewEvent(EventThought, 0, "开始处理："+truncate(userInput, 80)))
 
-	// 7. ReAct 循环
+	// 8. ReAct 循环
 	totalTokens := 0
 	totalToolCalls := 0
 	var finalAnswer string
 	var lastToolSig string
 	sameSigCount := 0
+	var pendingPerm *PendingPermissionInfo
 
 	for step := 1; step <= loopCfg.MaxRounds; step++ {
 		select {
@@ -196,7 +240,6 @@ func (e *AgentEngine) Run(ctx context.Context, session *entity.SessionEntity, us
 			totalTokens += len(resp.Content) / 2
 		}
 
-		// 解析工具调用：优先结构化，否则从 content 解析
 		toolCalls := resp.ToolCalls
 		if len(toolCalls) == 0 {
 			toolCalls = parseToolCalls(resp.Content)
@@ -215,7 +258,6 @@ func (e *AgentEngine) Run(ctx context.Context, session *entity.SessionEntity, us
 			break
 		}
 
-		// 死循环检测
 		sig := toolSignature(toolCalls)
 		if sig == lastToolSig {
 			sameSigCount++
@@ -229,7 +271,6 @@ func (e *AgentEngine) Run(ctx context.Context, session *entity.SessionEntity, us
 			lastToolSig = sig
 		}
 
-		// 记录 assistant 消息
 		asstContent := resp.Content
 		if asstContent == "" {
 			asstContent = formatToolCallsJSON(toolCalls)
@@ -237,16 +278,47 @@ func (e *AgentEngine) Run(ctx context.Context, session *entity.SessionEntity, us
 		messages = append(messages, port.ChatMessage{Role: "assistant", Content: asstContent})
 		_ = e.messageRepo.Save(ctx, entity.NewAssistantMessage(session.ID, asstContent, step))
 
-		// 限制本轮工具数
 		if len(toolCalls) > loopCfg.MaxToolCallsPerRound {
 			toolCalls = toolCalls[:loopCfg.MaxToolCallsPerRound]
 		}
 
+		needBreakForPerm := false
 		for _, tc := range toolCalls {
 			if totalToolCalls >= loopCfg.MaxTotalToolCalls {
 				break
 			}
 			totalToolCalls++
+
+			// ---- 权限门 ----
+			if e.permGuard != nil && !opts.AutoApprove {
+				dec := e.permGuard.Check(session.ID, tc.Name, tc.Args)
+				switch dec.Action {
+				case security.ActionDeny:
+					resultText := fmt.Sprintf("⛔ 权限拒绝: %s (%s)", dec.Reason, dec.RuleID)
+					publish(&AgentEvent{
+						Type: EventPermission, SubType: "deny", Step: step,
+						Content: resultText, Data: dec, Timestamp: time.Now().UnixMilli(),
+					})
+					messages = append(messages, port.ChatMessage{
+						Role: "user", Content: fmt.Sprintf("[工具 %s 执行结果]\n%s", tc.Name, resultText),
+					})
+					continue
+				case security.ActionConfirm:
+					p := e.permGuard.CreatePending(session.ID, tc.Name, tc.Args, dec)
+					pendingPerm = &PendingPermissionInfo{
+						ID: p.ID, Tool: p.Tool, Args: p.Args, Reason: p.Reason, RuleID: p.RuleID,
+					}
+					msg := fmt.Sprintf("⚠️ 操作需要确认\n工具: %s\n原因: %s\n确认ID: %s\n\n请在界面点击「批准」或调用 POST /api/v1/permission/approve 后重试（或发送「继续」）。",
+						tc.Name, dec.Reason, p.ID)
+					publish(&AgentEvent{
+						Type: EventPermission, SubType: "confirm", Step: step,
+						Content: msg, Data: pendingPerm, Completed: true, Timestamp: time.Now().UnixMilli(),
+					})
+					finalAnswer = msg
+					needBreakForPerm = true
+					break
+				}
+			}
 
 			publish(&AgentEvent{
 				Type: EventToolCall, SubType: tc.Name, Step: step,
@@ -269,13 +341,15 @@ func (e *AgentEngine) Run(ctx context.Context, session *entity.SessionEntity, us
 			toolMsg := entity.NewToolMessage(session.ID, tc.Name, tc.ID, resultText, step)
 			_ = e.messageRepo.Save(ctx, toolMsg)
 			messages = append(messages, port.ChatMessage{
-				Role: "user", // 多数兼容 API 用 user/tool 角色；此处用 user 包裹工具结果更稳妥
+				Role: "user",
 				Content: fmt.Sprintf("[工具 %s 执行结果]\n%s", tc.Name, resultText),
 				Name: tc.Name,
 			})
 		}
+		if needBreakForPerm {
+			break
+		}
 
-		// 追加继续推理提示
 		messages = append(messages, port.ChatMessage{
 			Role:    "user",
 			Content: e.promptService.BuildStepPrompt(step, userInput),
@@ -291,20 +365,25 @@ func (e *AgentEngine) Run(ctx context.Context, session *entity.SessionEntity, us
 		finalAnswer = "未能生成最终答案。"
 	}
 
-	// 更新会话
 	session.Touch()
 	_ = e.sessionRepo.Save(ctx, session)
 
 	publish(&AgentEvent{Type: EventComplete, Content: finalAnswer, Completed: true, Timestamp: time.Now().UnixMilli()})
 
-	return &AgentResult{
+	result := &AgentResult{
 		SessionID: session.ID,
 		Response:  finalAnswer,
 		Intent:    intentResult.Intent,
 		Steps:     totalToolCalls + 1,
 		TokenUsed: totalTokens,
 		ToolCalls: totalToolCalls,
-	}, nil
+		TaskPlan:  plan,
+	}
+	if pendingPerm != nil {
+		result.PendingPermission = pendingPerm
+		result.NeedPermission = true
+	}
+	return result, nil
 }
 
 func (e *AgentEngine) executeTool(ctx context.Context, tc port.ToolCall) string {
@@ -331,15 +410,16 @@ func (e *AgentEngine) toolInfos() []*valobj.ToolInfo {
 	return out
 }
 
-// ---- helpers ----
+func isContinue(s string) bool {
+	s = strings.TrimSpace(strings.ToLower(s))
+	return s == "继续" || s == "继续执行" || s == "continue" || s == "go on" || s == "ok" || s == "批准后继续"
+}
 
 func parseToolCalls(response string) []port.ToolCall {
 	response = strings.TrimSpace(response)
 	if response == "" {
 		return nil
 	}
-
-	// 纯 JSON
 	var single struct {
 		Name string                 `json:"name"`
 		Args map[string]interface{} `json:"args"`
@@ -347,8 +427,6 @@ func parseToolCalls(response string) []port.ToolCall {
 	if err := json.Unmarshal([]byte(response), &single); err == nil && single.Name != "" {
 		return []port.ToolCall{{Name: single.Name, Args: ensureArgs(single.Args)}}
 	}
-
-	// 数组
 	var multi []struct {
 		Name string                 `json:"name"`
 		Args map[string]interface{} `json:"args"`
@@ -364,13 +442,10 @@ func parseToolCalls(response string) []port.ToolCall {
 			return calls
 		}
 	}
-
-	// ```json 代码块
 	if idx := strings.Index(response, "```json"); idx >= 0 {
 		rest := response[idx+7:]
 		if end := strings.Index(rest, "```"); end >= 0 {
-			block := strings.TrimSpace(rest[:end])
-			return parseToolCalls(block)
+			return parseToolCalls(strings.TrimSpace(rest[:end]))
 		}
 	}
 	if idx := strings.Index(response, "```"); idx >= 0 {
@@ -383,8 +458,6 @@ func parseToolCalls(response string) []port.ToolCall {
 			return parseToolCalls(block)
 		}
 	}
-
-	// 提取第一个 { ... }
 	if start := strings.Index(response, "{"); start >= 0 {
 		if end := strings.LastIndex(response, "}"); end > start {
 			return parseToolCalls(response[start : end+1])

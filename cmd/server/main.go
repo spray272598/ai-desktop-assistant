@@ -52,7 +52,9 @@ func main() {
 }
 
 func runHTTP(app *bootstrap.App, cfg *config.Config) {
-	srv := httpserver.NewServer(app.AgentApp, cfg.Addr()).WithToolDescriptions(app.Tools.GetToolDescriptions)
+	srv := httpserver.NewServer(app.AgentApp, cfg.Addr()).
+		WithToolDescriptions(app.Tools.GetToolDescriptions).
+		WithWebDir("web")
 
 	go func() {
 		if err := srv.Start(); err != nil {

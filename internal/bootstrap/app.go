@@ -19,8 +19,12 @@ import (
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/engine"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/intent"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/prompt"
+	"github.com/ai-desktop/assistant/internal/domain/agent/service/security"
+	"github.com/ai-desktop/assistant/internal/domain/agent/service/task"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/tools"
+	mcprepo "github.com/ai-desktop/assistant/internal/domain/mcp/adapter/repository"
 	mcpentity "github.com/ai-desktop/assistant/internal/domain/mcp/model/entity"
+	mcpsvc "github.com/ai-desktop/assistant/internal/domain/mcp/service"
 	desktopService "github.com/ai-desktop/assistant/internal/domain/desktop/service"
 	"github.com/ai-desktop/assistant/internal/infrastructure/config"
 	"github.com/ai-desktop/assistant/internal/infrastructure/llm"
@@ -31,40 +35,35 @@ import (
 
 // App 组装后的应用根
 type App struct {
-	Config   *config.Config
-	AgentApp *application.AgentApp
-	Engine   *engine.AgentEngine
-	Tools    *service.ToolRegistry
-	MCP      *inframcp.Manager
-	Closer   func()
+	Config     *config.Config
+	AgentApp   *application.AgentApp
+	Engine     *engine.AgentEngine
+	Tools      *service.ToolRegistry
+	MCP        *inframcp.Manager
+	MCPService *mcpsvc.MCPService
+	PermGuard  *security.PermissionGuard
+	Closer     func()
 }
 
-// Build 根据配置组装全部依赖
 func Build(cfg *config.Config) (*App, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is nil")
 	}
 
-	// ---- 仓储：MySQL 优先，失败可降级 memory ----
-	sessionRepo, messageRepo, milestoneRepo, memoryRepo, closer, err := buildRepos(cfg)
+	sessionRepo, messageRepo, milestoneRepo, memoryRepo, mcpRepo, closer, err := buildRepos(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	// LLM
 	llmPort := llm.NewFromConfig(cfg)
-
-	// 意图
 	tracker := intent.NewContextTracker()
 	intentService := intent.NewIntentService(intent.NewRuleClassifier(), llmPort, tracker)
 
-	// 提示词 / 里程碑（持久化）
 	promptService := prompt.NewPromptService()
 	milestoneTracker := prompt.NewMilestoneTracker(100)
 	milestoneTracker.SetRepository(milestoneRepo)
 	milestoneTracker.SetMemoryRepository(memoryRepo)
 
-	// 上下文 providers
 	envProvider := provider.NewEnvProvider(cfg.Desktop.Workspace)
 	taskProvider := provider.NewTaskProvider()
 	milestoneProvider := provider.NewMilestoneProvider(milestoneTracker)
@@ -77,7 +76,6 @@ func Build(cfg *config.Config) (*App, error) {
 		cfg.Agent.TokenBudget,
 	)
 
-	// 桌面服务（文件 + 命令为核心）
 	fileService := desktopService.NewFileService(cfg.Tools.File.BaseDir)
 	cmdService := desktopService.NewCommandServiceWithPolicy(
 		cfg.Tools.Command.MaxTimeout,
@@ -85,7 +83,6 @@ func Build(cfg *config.Config) (*App, error) {
 	)
 	shotService := desktopService.NewScreenshotService(cfg.Desktop.ScreenshotDir)
 
-	// 工具注册：本地工具 + MCP 工具
 	toolRegistry := service.NewToolRegistry()
 	if cfg.Tools.File.Enabled {
 		toolRegistry.Register(tools.NewReadFileTool(fileService))
@@ -101,31 +98,59 @@ func Build(cfg *config.Config) (*App, error) {
 		toolRegistry.Register(tools.NewScreenshotTool(shotService))
 	}
 
-	// MCP Manager
+	// 权限门 + 任务拆解
+	permGuard := security.NewPermissionGuard()
+	breakdown := task.NewBreakdownService(llmPort)
+
+	// MCP
 	var mcpManager *inframcp.Manager
+	var mcpService *mcpsvc.MCPService
 	if cfg.MCP.Enabled {
+		// 合并：配置文件 + DB
 		mcpCfgs := resolveMCPConfigs(cfg)
+		if mcpRepo != nil {
+			if dbList, err := mcpRepo.ListEnabled(context.Background()); err == nil && len(dbList) > 0 {
+				// DB 优先覆盖同名
+				byName := map[string]mcpentity.ServerConfig{}
+				for _, c := range mcpCfgs {
+					byName[c.Name] = c
+				}
+				for _, c := range dbList {
+					byName[c.Name] = c
+				}
+				mcpCfgs = mcpCfgs[:0]
+				for _, c := range byName {
+					mcpCfgs = append(mcpCfgs, c)
+				}
+			}
+			// 把 yaml 默认配置写入 DB（不覆盖已有）
+			for _, c := range resolveMCPConfigs(cfg) {
+				if existing, _ := mcpRepo.FindByName(context.Background(), c.Name); existing == nil {
+					_ = mcpRepo.Save(context.Background(), &c)
+				}
+			}
+		}
 		mcpManager = inframcp.NewManager(mcpCfgs)
+		mcpService = mcpsvc.NewMCPService(mcpManager, mcpRepo, toolRegistry)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if err := mcpManager.Start(ctx); err != nil {
 			log.Printf("[bootstrap] mcp start warn: %v\n", err)
 		}
 		cancel()
-		// 注册 MCP 工具到 Agent
-		if mcpTools, err := mcpManager.ListTools(context.Background()); err == nil {
-			for _, t := range mcpTools {
+		// 初始同步工具
+		if toolsList, err := mcpManager.ListTools(context.Background()); err == nil {
+			for _, t := range toolsList {
 				toolRegistry.Register(tools.NewMCPTool(t, mcpManager))
 			}
-			log.Printf("[bootstrap] registered %d MCP tools\n", len(mcpTools))
+			log.Printf("[bootstrap] registered %d MCP tools\n", len(toolsList))
 		}
 	}
 
-	// Agent 实体
 	agent := entity.NewAgentEntity(
 		"desktop-agent",
 		cfg.Agent.Name,
-		"桌面 AI 助手：会话持久化 + 本地文件/命令 + MCP 扩展工具",
-		"你是一个强大的桌面AI助手。核心能力：理解用户意图、操作工作区文件、执行命令、调用 MCP 扩展工具、保持跨轮对话上下文。",
+		"桌面 AI 助手：持久化 + 本地工具 + MCP + 任务规划 + 权限门",
+		"你是一个强大的桌面AI助手。核心：理解意图、规划多步任务、安全地操作文件与命令、调用 MCP 扩展。",
 	)
 	agent.MaxSteps = cfg.Agent.MaxSteps
 
@@ -134,54 +159,38 @@ func Build(cfg *config.Config) (*App, error) {
 	loopCfg.MaxTokenBudget = cfg.Agent.TokenBudget
 
 	eng := engine.NewAgentEngine(
-		agent,
-		intentService,
-		promptService,
-		milestoneTracker,
-		chatContext,
-		llmPort,
-		toolRegistry,
-		sessionRepo,
-		messageRepo,
-		loopCfg,
+		agent, intentService, promptService, milestoneTracker, chatContext,
+		llmPort, toolRegistry, sessionRepo, messageRepo, loopCfg,
 	)
+	eng.SetBreakdown(breakdown)
+	eng.SetPermissionGuard(permGuard)
 
 	agentApp := application.NewAgentApp(
-		eng,
-		sessionRepo,
-		messageRepo,
-		"desktop-agent",
-		cfg.Agent.Timeout,
-		cfg.Desktop.Workspace,
+		eng, sessionRepo, messageRepo, "desktop-agent", cfg.Agent.Timeout, cfg.Desktop.Workspace,
 	)
+	agentApp.SetMCPService(mcpService)
+	agentApp.SetPermissionGuard(permGuard)
 
-	log.Printf("[bootstrap] agent=%s db=%s maxSteps=%d tools=%d mcpClients=%d workspace=%s\n",
-		cfg.Agent.Name, cfg.Database.Type, cfg.Agent.MaxSteps,
-		len(toolRegistry.ListTools()),
+	log.Printf("[bootstrap] agent=%s db=%s tools=%d mcp=%d workspace=%s\n",
+		cfg.Agent.Name, cfg.Database.Type, len(toolRegistry.ListTools()),
 		func() int {
 			if mcpManager == nil {
 				return 0
 			}
 			return mcpManager.ClientCount()
-		}(),
-		cfg.Desktop.Workspace)
-
-	appCloser := func() {
-		if mcpManager != nil {
-			_ = mcpManager.Close()
-		}
-		if closer != nil {
-			closer()
-		}
-	}
+		}(), cfg.Desktop.Workspace)
 
 	return &App{
-		Config:   cfg,
-		AgentApp: agentApp,
-		Engine:   eng,
-		Tools:    toolRegistry,
-		MCP:      mcpManager,
-		Closer:   appCloser,
+		Config: cfg, AgentApp: agentApp, Engine: eng, Tools: toolRegistry,
+		MCP: mcpManager, MCPService: mcpService, PermGuard: permGuard,
+		Closer: func() {
+			if mcpManager != nil {
+				_ = mcpManager.Close()
+			}
+			if closer != nil {
+				closer()
+			}
+		},
 	}, nil
 }
 
@@ -190,6 +199,7 @@ func buildRepos(cfg *config.Config) (
 	repository.IMessageRepository,
 	repository.IMilestoneRepository,
 	repository.ICoreMemoryRepository,
+	mcprepo.IMCPServerRepository,
 	func(),
 	error,
 ) {
@@ -203,16 +213,17 @@ func buildRepos(cfg *config.Config) (
 				infraRepo.NewMySQLMessageRepository(db),
 				infraRepo.NewMySQLMilestoneRepository(db),
 				infraRepo.NewMySQLCoreMemoryRepository(db),
+				infraRepo.NewMySQLMCPServerRepository(db),
 				func() { _ = db.Close() },
 				nil
 		}
 	}
-	// memory
 	cfg.Database.Type = "memory"
 	return infraRepo.NewMemorySessionRepository(),
 		infraRepo.NewMemoryMessageRepository(),
 		infraRepo.NewMemoryMilestoneRepository(),
 		infraRepo.NewMemoryCoreMemoryRepository(),
+		infraRepo.NewMemoryMCPServerRepository(),
 		func() {},
 		nil
 }
@@ -245,19 +256,10 @@ func resolveMCPConfigs(cfg *config.Config) []mcpentity.ServerConfig {
 }
 
 func findMCPDemoBinary() string {
-	candidates := []string{
-		"./mcp-demo",
-		"./mcp-demo.exe",
-		"./bin/mcp-demo",
-		"./bin/mcp-demo.exe",
-	}
-	// 相对可执行文件目录
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		candidates = append(candidates,
-			filepath.Join(dir, "mcp-demo"),
-			filepath.Join(dir, "mcp-demo.exe"),
-		)
+	candidates := []string{"./mcp-demo", "./mcp-demo.exe", "./bin/mcp-demo", "./bin/mcp-demo.exe"}
+	if ex, err := os.Executable(); err == nil {
+		dir := filepath.Dir(ex)
+		candidates = append(candidates, filepath.Join(dir, "mcp-demo"), filepath.Join(dir, "mcp-demo.exe"))
 	}
 	for _, c := range candidates {
 		if st, err := os.Stat(c); err == nil && !st.IsDir() {
@@ -265,10 +267,8 @@ func findMCPDemoBinary() string {
 			return abs
 		}
 	}
-	// Windows 上尝试 go run（较慢，仅开发）
 	if runtime.GOOS == "windows" {
-		// 不自动 go run，避免启动过慢；提示用户先 build
-		log.Println("[mcp] tip: build demo server with: go build -o mcp-demo.exe ./cmd/mcp-demo")
+		log.Println("[mcp] tip: go build -o mcp-demo.exe ./cmd/mcp-demo")
 	}
 	return ""
 }

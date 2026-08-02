@@ -19,6 +19,7 @@ COPY --from=builder /out/assistant /app/assistant
 COPY --from=builder /out/mcp-demo /app/mcp-demo
 COPY configs/config.yaml /app/configs/config.yaml
 COPY docs/dev-ops/mysql/sql /app/docs/dev-ops/mysql/sql
+COPY web /app/web
 RUN mkdir -p /app/workspace /app/screenshots /app/logs /app/temp \
  && chmod +x /app/assistant /app/mcp-demo
 ENV SERVER_HOST=0.0.0.0
