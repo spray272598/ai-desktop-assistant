@@ -61,12 +61,15 @@ func (r *MemorySessionRepository) Delete(_ context.Context, id string) error {
 func (r *MemorySessionRepository) ListActive(_ context.Context, limit int) ([]*entity.SessionEntity, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if limit <= 0 {
+		limit = 50 // 与 common.DefaultListActiveLimit 对齐；memory 包避免循环依赖
+	}
 	var list []*entity.SessionEntity
 	for _, s := range r.sessions {
 		if s.Status == "ACTIVE" {
 			cp := *s
 			list = append(list, &cp)
-			if limit > 0 && len(list) >= limit {
+			if len(list) >= limit {
 				break
 			}
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -13,22 +14,44 @@ import (
 
 // CommandService 带安全检查的命令执行
 type CommandService struct {
-	denyList   []string
-	maxTimeout int
+	denyPatterns []*regexp.Regexp
+	denyLabels   []string
+	maxTimeout   int
 }
 
 func NewCommandService() *CommandService {
 	return NewCommandServiceWithPolicy(60, []string{
-		"rm -rf /", "format c:", "mkfs", "shutdown", "reboot",
-		"del /f /s /q", ":(){", "dd if=", "mkfs.", "diskpart",
+		`(?i)\brm\s+-rf?\s+/?(\s|$)`,
+		`(?i)\brm\s+-rf?\s+\*`,
+		`(?i)\bformat\s+c:`,
+		`(?i)\bmkfs(\.|$|\s)`,
+		`(?i)\b(shutdown|poweroff|halt|reboot)\b`,
+		`(?i)\bdel\s+/[fFsS]*\s*/[sS]\s*/[qQ]`,
+		`:\(\)\s*\{\s*:|:&`,
+		`(?i)\bdd\s+if=`,
+		`(?i)\bdiskpart\b`,
 	})
 }
 
+// NewCommandServiceWithPolicy denyList 项优先按正则编译；编译失败则按字面量转义后匹配。
 func NewCommandServiceWithPolicy(maxTimeout int, denyList []string) *CommandService {
 	if maxTimeout <= 0 {
 		maxTimeout = 60
 	}
-	return &CommandService{denyList: denyList, maxTimeout: maxTimeout}
+	s := &CommandService{maxTimeout: maxTimeout}
+	for _, d := range denyList {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		re, err := regexp.Compile(d)
+		if err != nil {
+			re = regexp.MustCompile("(?i)" + regexp.QuoteMeta(d))
+		}
+		s.denyPatterns = append(s.denyPatterns, re)
+		s.denyLabels = append(s.denyLabels, d)
+	}
+	return s
 }
 
 func (s *CommandService) ExecuteCommand(op *valobj.CommandOperation) (*valobj.CommandResult, error) {
@@ -55,10 +78,8 @@ func (s *CommandService) ExecuteCommand(op *valobj.CommandOperation) (*valobj.Co
 	var cmd *exec.Cmd
 	switch op.Type {
 	case valobj.CmdScript:
-		// Command = interpreter, Args = script + args
 		cmd = exec.CommandContext(ctx, op.Command, op.Args...)
 	default:
-		// Shell 执行：Windows 用 cmd /c，其他用 sh -c
 		full := op.Command
 		if len(op.Args) > 0 {
 			full = op.Command + " " + strings.Join(op.Args, " ")
@@ -105,13 +126,14 @@ func (s *CommandService) ExecuteCommand(op *valobj.CommandOperation) (*valobj.Co
 }
 
 func (s *CommandService) checkDenied(command string, args []string) error {
-	full := strings.ToLower(command + " " + strings.Join(args, " "))
-	for _, d := range s.denyList {
-		if d == "" {
-			continue
-		}
-		if strings.Contains(full, strings.ToLower(d)) {
-			return fmt.Errorf("危险命令已拦截: 匹配规则 %q", d)
+	full := command + " " + strings.Join(args, " ")
+	for i, re := range s.denyPatterns {
+		if re.MatchString(full) {
+			label := full
+			if i < len(s.denyLabels) {
+				label = s.denyLabels[i]
+			}
+			return fmt.Errorf("危险命令已拦截: 匹配规则 %q", label)
 		}
 	}
 	return nil

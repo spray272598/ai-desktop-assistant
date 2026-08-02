@@ -20,13 +20,19 @@ func (r *MySQLMCPServerRepository) Save(ctx context.Context, cfg *entity.ServerC
 	if cfg == nil {
 		return nil
 	}
-	argsJSON, _ := json.Marshal(cfg.Args)
-	envJSON, _ := json.Marshal(cfg.Env)
+	argsJSON, err := json.Marshal(cfg.Args)
+	if err != nil {
+		return err
+	}
+	envJSON, err := json.Marshal(cfg.Env)
+	if err != nil {
+		return err
+	}
 	enabled := 0
 	if cfg.Enabled {
 		enabled = 1
 	}
-	_, err := r.db.ExecContext(ctx, `
+	_, err = r.db.ExecContext(ctx, `
 INSERT INTO mcp_server_config (name, transport, command, args_json, env_json, url, enabled, timeout_sec)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE

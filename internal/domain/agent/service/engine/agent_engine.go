@@ -19,6 +19,7 @@ import (
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/prompt"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/security"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/task"
+	"github.com/ai-desktop/assistant/internal/types/common"
 	"github.com/ai-desktop/assistant/internal/types/enums"
 )
 
@@ -176,12 +177,14 @@ func (e *AgentEngine) RunWithOptions(ctx context.Context, session *entity.Sessio
 	}
 	userPrompt := e.promptService.BuildUserPrompt(userInput, pctx)
 
-	// 6. 持久化用户消息
+	// 6. 持久化用户消息（估算 token，避免统计恒为 0）
 	userMsg := entity.NewUserMessage(session.ID, userInput)
+	userTokens := common.EstimateTokens(userInput)
+	userMsg.TokenCount = userTokens
 	_ = e.messageRepo.Save(ctx, userMsg)
-	session.AddMessage(0)
+	session.AddMessage(userTokens)
 
-	// 7. 组装 LLM 消息
+	// 7. 组装 LLM 消息（历史中的 tool 角色原样保留）
 	messages := make([]port.ChatMessage, 0, len(historyMaps)+8)
 	for _, m := range historyMaps {
 		role, _ := m["role"].(string)
@@ -189,7 +192,14 @@ func (e *AgentEngine) RunWithOptions(ctx context.Context, session *entity.Sessio
 		if role == "" || content == "" || role == "system" {
 			continue
 		}
-		messages = append(messages, port.ChatMessage{Role: role, Content: content})
+		cm := port.ChatMessage{Role: role, Content: content}
+		if name, ok := m["toolName"].(string); ok {
+			cm.Name = name
+		}
+		if id, ok := m["toolCallId"].(string); ok {
+			cm.ToolCallID = id
+		}
+		messages = append(messages, cm)
 	}
 	messages = append(messages, port.ChatMessage{Role: "user", Content: userPrompt})
 
@@ -235,9 +245,10 @@ func (e *AgentEngine) RunWithOptions(ctx context.Context, session *entity.Sessio
 			break
 		}
 
-		totalTokens += resp.TotalTokens
-		if totalTokens == 0 {
-			totalTokens += len(resp.Content) / 2
+		if resp.TotalTokens > 0 {
+			totalTokens += resp.TotalTokens
+		} else {
+			totalTokens += common.EstimateTokens(resp.Content)
 		}
 
 		toolCalls := resp.ToolCalls
@@ -251,8 +262,13 @@ func (e *AgentEngine) RunWithOptions(ctx context.Context, session *entity.Sessio
 				finalAnswer = "已完成处理。"
 			}
 			asst := entity.NewAssistantMessage(session.ID, finalAnswer, step)
+			asstTokens := resp.TotalTokens
+			if asstTokens <= 0 {
+				asstTokens = common.EstimateTokens(finalAnswer)
+			}
+			asst.TokenCount = asstTokens
 			_ = e.messageRepo.Save(ctx, asst)
-			session.AddMessage(resp.TotalTokens)
+			session.AddMessage(asstTokens)
 			e.milestones.AddMilestone(session.ID, valobj.NewMilestone(valobj.MilestoneTaskComplete, truncate(finalAnswer, 120), step))
 			publish(&AgentEvent{Type: EventAnswer, Step: step, Content: finalAnswer, Completed: true, Timestamp: time.Now().UnixMilli()})
 			break
@@ -299,8 +315,9 @@ func (e *AgentEngine) RunWithOptions(ctx context.Context, session *entity.Sessio
 						Type: EventPermission, SubType: "deny", Step: step,
 						Content: resultText, Data: dec, Timestamp: time.Now().UnixMilli(),
 					})
+					callID := ensureToolCallID(tc)
 					messages = append(messages, port.ChatMessage{
-						Role: "user", Content: fmt.Sprintf("[工具 %s 执行结果]\n%s", tc.Name, resultText),
+						Role: "tool", Content: resultText, Name: tc.Name, ToolCallID: callID,
 					})
 					continue
 				case security.ActionConfirm:
@@ -320,6 +337,7 @@ func (e *AgentEngine) RunWithOptions(ctx context.Context, session *entity.Sessio
 				}
 			}
 
+			callID := ensureToolCallID(tc)
 			publish(&AgentEvent{
 				Type: EventToolCall, SubType: tc.Name, Step: step,
 				Content: fmt.Sprintf("调用工具: %s", tc.Name),
@@ -338,12 +356,15 @@ func (e *AgentEngine) RunWithOptions(ctx context.Context, session *entity.Sessio
 				Content: truncate(resultText, 800), Timestamp: time.Now().UnixMilli(),
 			})
 
-			toolMsg := entity.NewToolMessage(session.ID, tc.Name, tc.ID, resultText, step)
+			toolMsg := entity.NewToolMessage(session.ID, tc.Name, callID, resultText, step)
+			toolMsg.TokenCount = common.EstimateTokens(resultText)
 			_ = e.messageRepo.Save(ctx, toolMsg)
+			// ChatML：工具结果必须用 tool 角色，避免模型把结果当用户输入
 			messages = append(messages, port.ChatMessage{
-				Role: "user",
-				Content: fmt.Sprintf("[工具 %s 执行结果]\n%s", tc.Name, resultText),
-				Name: tc.Name,
+				Role:       "tool",
+				Content:    resultText,
+				Name:       tc.Name,
+				ToolCallID: callID,
 			})
 		}
 		if needBreakForPerm {
@@ -471,6 +492,15 @@ func ensureArgs(args map[string]interface{}) map[string]interface{} {
 		return map[string]interface{}{}
 	}
 	return args
+}
+
+func ensureToolCallID(tc port.ToolCall) string {
+	if tc.ID != "" {
+		return tc.ID
+	}
+	// 无原生 tool_call_id 时生成稳定短 id，便于 ChatML tool 消息配对
+	h := sha256.Sum256([]byte(tc.Name + formatToolCallsJSON([]port.ToolCall{tc})))
+	return "call_" + hex.EncodeToString(h[:8])
 }
 
 func toolSignature(calls []port.ToolCall) string {

@@ -168,18 +168,30 @@ func (m *Manager) ReloadAll(ctx context.Context, configs []entity.ServerConfig) 
 	return err
 }
 
+// ServerView MCP 服务视图（配置 + 在线状态）
+type ServerView struct {
+	entity.ServerConfig
+	Online bool `json:"online"`
+}
+
 func (m *Manager) ListServers() []entity.ServerConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]entity.ServerConfig, 0, len(m.configs))
 	for _, c := range m.configs {
-		// 标注是否在线
-		cp := c
-		if _, ok := m.clients[c.Name]; ok {
-			// use metadata in name? keep as is, Enabled means configured
-			_ = ok
-		}
-		out = append(out, cp)
+		out = append(out, c)
+	}
+	return out
+}
+
+// ListServerViews 返回配置及是否在线（无死代码的在线状态）
+func (m *Manager) ListServerViews() []ServerView {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]ServerView, 0, len(m.configs))
+	for _, c := range m.configs {
+		_, online := m.clients[c.Name]
+		out = append(out, ServerView{ServerConfig: c, Online: online})
 	}
 	return out
 }

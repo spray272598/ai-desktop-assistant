@@ -23,14 +23,21 @@ func (g *MockGateway) Generate(ctx context.Context, req *port.ChatRequest) (*por
 
 	for i := len(req.Messages) - 1; i >= 0; i-- {
 		m := req.Messages[i]
-		if strings.Contains(m.Content, "[工具") && strings.Contains(m.Content, "执行结果]") {
+		// 优先识别 tool 角色（ChatML）；兼容旧的 user 包裹格式
+		isTool := m.Role == "tool" ||
+			(strings.Contains(m.Content, "[工具") && strings.Contains(m.Content, "执行结果]"))
+		if isTool {
 			preview := m.Content
 			if len(preview) > 600 {
 				preview = preview[:600] + "\n...(截断)"
 			}
+			label := m.Name
+			if label == "" {
+				label = "tool"
+			}
 			return &port.ChatResponse{
-				Content:     fmt.Sprintf("📋 操作结果如下：\n\n%s", preview),
-				TotalTokens: len(preview) / 2,
+				Content:     fmt.Sprintf("📋 操作结果如下（%s）：\n\n%s", label, preview),
+				TotalTokens: len([]rune(preview))/2 + 1,
 			}, nil
 		}
 	}

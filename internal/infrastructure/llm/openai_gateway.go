@@ -45,9 +45,10 @@ type chatCompletionReq struct {
 }
 
 type chatMsg struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-	Name    string `json:"name,omitempty"`
+	Role       string `json:"role"`
+	Content    string `json:"content"`
+	Name       string `json:"name,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 type chatCompletionResp struct {
@@ -83,10 +84,19 @@ func (g *OpenAIGateway) Generate(ctx context.Context, req *port.ChatRequest) (*p
 	}
 	for _, m := range req.Messages {
 		role := m.Role
-		if role == "tool" {
+		if role == "" {
 			role = "user"
 		}
-		msgs = append(msgs, chatMsg{Role: role, Content: m.Content, Name: m.Name})
+		// 保留 tool 角色（ChatML）；部分网关要求 tool 消息带 tool_call_id
+		msg := chatMsg{Role: role, Content: m.Content, Name: m.Name}
+		if role == "tool" {
+			msg.ToolCallID = m.ToolCallID
+			if msg.ToolCallID == "" {
+				// 兼容无 id 的历史消息：用 name 派生，避免空 tool_call_id
+				msg.ToolCallID = "call_" + m.Name
+			}
+		}
+		msgs = append(msgs, msg)
 	}
 
 	temp := req.Temperature

@@ -50,26 +50,40 @@ func (s *MCPService) syncTools(defs []entity.ToolDef) {
 }
 
 func (s *MCPService) ListServers(ctx context.Context) ([]map[string]interface{}, error) {
-	var configs []entity.ServerConfig
+	// 优先 Manager 视图（含在线状态）；再合并 repo 中未启动的配置
+	byName := map[string]map[string]interface{}{}
+	if s.manager != nil {
+		for _, v := range s.manager.ListServerViews() {
+			byName[v.Name] = map[string]interface{}{
+				"name": v.Name, "transport": v.Transport, "command": v.Command,
+				"args": v.Args, "url": v.URL, "enabled": v.Enabled,
+				"timeoutSec": v.TimeoutSec, "online": v.Online,
+			}
+		}
+	}
 	if s.repo != nil {
-		if list, err := s.repo.List(ctx); err == nil && len(list) > 0 {
-			configs = list
+		list, err := s.repo.List(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list mcp servers from db: %w", err)
+		}
+		for _, c := range list {
+			if _, ok := byName[c.Name]; ok {
+				continue
+			}
+			online := false
+			if s.manager != nil {
+				online = s.manager.IsOnline(c.Name)
+			}
+			byName[c.Name] = map[string]interface{}{
+				"name": c.Name, "transport": c.Transport, "command": c.Command,
+				"args": c.Args, "url": c.URL, "enabled": c.Enabled,
+				"timeoutSec": c.TimeoutSec, "online": online,
+			}
 		}
 	}
-	if len(configs) == 0 && s.manager != nil {
-		configs = s.manager.ListServers()
-	}
-	out := make([]map[string]interface{}, 0, len(configs))
-	for _, c := range configs {
-		online := false
-		if s.manager != nil {
-			online = s.manager.IsOnline(c.Name)
-		}
-		out = append(out, map[string]interface{}{
-			"name": c.Name, "transport": c.Transport, "command": c.Command,
-			"args": c.Args, "url": c.URL, "enabled": c.Enabled,
-			"timeoutSec": c.TimeoutSec, "online": online,
-		})
+	out := make([]map[string]interface{}, 0, len(byName))
+	for _, v := range byName {
+		out = append(out, v)
 	}
 	return out, nil
 }
