@@ -13,19 +13,22 @@ agent:
 llm:
   provider: "siliconflow"
   model: "deepseek-ai/DeepSeek-V3"
-  api_key: ""          # 也可用环境变量 LLM_API_KEY
+  api_key: ""
   api_base: "https://api.siliconflow.cn/v1"
-  use_mock: false      # 无 api_key 时自动降级为 mock
+  use_mock: false
 
 desktop:
   workspace: "./workspace"
   temp_dir: "./temp"
   screenshot_dir: "./screenshots"
 
+# 持久化：mysql（推荐）| memory（无库降级）
 database:
-  type: "memory"
+  type: "mysql"
+  auto_migrate: true
+  schema_path: "docs/dev-ops/mysql/sql/01_schema.sql"
   mysql:
-    host: "mysql"
+    host: "127.0.0.1"
     port: 3306
     database: "ai_desktop_assistant"
     username: "root"
@@ -55,7 +58,32 @@ tools:
       - "reboot"
       - "del /f /s /q"
   screenshot:
-    enabled: true
+    enabled: false
     save_dir: "./screenshots"
   browser:
     enabled: false
+
+# MCP：桌面助手扩展工具的主通道
+mcp:
+  enabled: true
+  servers:
+    # 内置 demo 服务（stdio），bootstrap 会自动解析 command 为 mcp-demo 可执行文件
+    - name: demo
+      transport: stdio
+      command: ""          # 留空则自动查找 ./mcp-demo 或 go run 构建产物
+      args: []
+      timeout_sec: 30
+      enabled: true
+    # 示例：远程 SSE MCP
+    # - name: remote-search
+    #   transport: sse
+    #   url: "https://example.com/mcp/sse"
+    #   timeout_sec: 60
+    #   enabled: false
+    # 示例：npx filesystem MCP
+    # - name: fs
+    #   transport: stdio
+    #   command: "npx"
+    #   args: ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"]
+    #   timeout_sec: 60
+    #   enabled: false

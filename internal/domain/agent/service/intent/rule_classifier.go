@@ -91,7 +91,7 @@ func initRules() []IntentRule {
 		{Intent: "START_APP", Keywords: []string{"启动应用", "打开应用", "launch app", "start app"}, Weight: 0.9},
 		{Intent: "SCREENSHOT", Keywords: []string{"截图", "截屏", "screenshot", "capture screen"}, Weight: 1.0},
 		{Intent: "OPEN_URL", Keywords: []string{"打开网站", "打开网页", "open url", "浏览"}, Weight: 0.9},
-		{Intent: "SYSTEM_INFO", Keywords: []string{"系统信息", "内存使用", "cpu", "system info"}, Weight: 0.9},
+		{Intent: "SYSTEM_INFO", Keywords: []string{"系统信息", "内存使用", "cpu", "system info", "当前时间", "几点", "get_time", "工作区信息"}, Weight: 0.9},
 		{Intent: "TASK_PLAN", Keywords: []string{"帮我规划", "制定计划", "任务分解", "分步骤"}, Weight: 0.85},
 	}
 }

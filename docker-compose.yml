@@ -1,18 +1,54 @@
 services:
+  mysql:
+    image: mysql:8.0.36
+    container_name: ai-desktop-mysql
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_DATABASE: ai_desktop_assistant
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docs/dev-ops/mysql/sql/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p123456"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks:
+      - assistant-net
+
   assistant:
     build: .
     container_name: ai-desktop-assistant
     restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
       - TZ=Asia/Shanghai
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8080
+      - DB_TYPE=mysql
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=ai_desktop_assistant
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=123456
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_API_BASE=${LLM_API_BASE:-https://api.siliconflow.cn/v1}
       - LLM_MODEL=${LLM_MODEL:-deepseek-ai/DeepSeek-V3}
       - LLM_USE_MOCK=${LLM_USE_MOCK:-true}
+      - MCP_ENABLED=${MCP_ENABLED:-true}
       - DESKTOP_WORKSPACE=/app/workspace
     volumes:
       - ./workspace:/app/workspace
@@ -24,18 +60,13 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 15s
+    networks:
+      - assistant-net
 
-  # 可选：后续持久化扩展
-  # mysql:
-  #   image: mysql:8.0
-  #   environment:
-  #     MYSQL_ROOT_PASSWORD: "123456"
-  #     MYSQL_DATABASE: ai_desktop_assistant
-  #   ports:
-  #     - "13306:3306"
-  #   volumes:
-  #     - mysql_data:/var/lib/mysql
+volumes:
+  mysql_data:
 
-# volumes:
-#   mysql_data:
+networks:
+  assistant-net:
+    driver: bridge

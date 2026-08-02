@@ -16,13 +16,19 @@ import (
 
 // Server HTTP 触发层
 type Server struct {
-	app    *application.AgentApp
-	addr   string
-	server *http.Server
+	app          *application.AgentApp
+	toolDescFunc func() []map[string]string
+	addr         string
+	server       *http.Server
 }
 
 func NewServer(app *application.AgentApp, addr string) *Server {
 	return &Server{app: app, addr: addr}
+}
+
+func (s *Server) WithToolDescriptions(fn func() []map[string]string) *Server {
+	s.toolDescFunc = fn
+	return s
 }
 
 func (s *Server) Start() error {
@@ -30,7 +36,9 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/api/v1/session/create", s.handleCreateSession)
 	mux.HandleFunc("/api/v1/session/info", s.handleSessionInfo)
+	mux.HandleFunc("/api/v1/session/list", s.handleSessionList)
 	mux.HandleFunc("/api/v1/session/messages", s.handleSessionMessages)
+	mux.HandleFunc("/api/v1/tools", s.handleTools)
 	mux.HandleFunc("/api/v1/chat", s.handleChat)
 	mux.HandleFunc("/api/v1/chat/stream", s.handleChatStream)
 
@@ -86,6 +94,28 @@ func (s *Server) handleSessionInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, response.Success(info))
+}
+
+func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("userId")
+	if userID == "" {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "userId required"))
+		return
+	}
+	list, err := s.app.ListSessionsByUser(userID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, response.Error(enums.SystemError.Code, err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(list))
+}
+
+func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
+	if s.toolDescFunc == nil {
+		writeJSON(w, http.StatusOK, response.Success([]map[string]string{}))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(s.toolDescFunc()))
 }
 
 func (s *Server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {

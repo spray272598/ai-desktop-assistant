@@ -18,6 +18,7 @@ type Config struct {
 	Redis    RedisConfig    `yaml:"redis"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	Tools    ToolsConfig    `yaml:"tools"`
+	MCP      MCPConfig      `yaml:"mcp"`
 }
 
 type ServerConfig struct {
@@ -49,8 +50,10 @@ type DesktopConfig struct {
 }
 
 type DatabaseConfig struct {
-	Type  string      `yaml:"type"`
-	MySQL MySQLConfig `yaml:"mysql"`
+	Type        string      `yaml:"type"` // memory | mysql
+	AutoMigrate bool        `yaml:"auto_migrate"`
+	SchemaPath  string      `yaml:"schema_path"`
+	MySQL       MySQLConfig `yaml:"mysql"`
 }
 
 type MySQLConfig struct {
@@ -73,10 +76,10 @@ type LoggingConfig struct {
 }
 
 type ToolsConfig struct {
-	File       ToolToggle `yaml:"file"`
+	File       ToolToggle        `yaml:"file"`
 	Command    CommandToolConfig `yaml:"command"`
-	Screenshot ToolToggle `yaml:"screenshot"`
-	Browser    ToolToggle `yaml:"browser"`
+	Screenshot ToolToggle        `yaml:"screenshot"`
+	Browser    ToolToggle        `yaml:"browser"`
 }
 
 type ToolToggle struct {
@@ -90,6 +93,22 @@ type CommandToolConfig struct {
 	MaxTimeout int      `yaml:"max_timeout"`
 	AllowList  []string `yaml:"allow_list"`
 	DenyList   []string `yaml:"deny_list"`
+}
+
+type MCPConfig struct {
+	Enabled bool              `yaml:"enabled"`
+	Servers []MCPServerConfig `yaml:"servers"`
+}
+
+type MCPServerConfig struct {
+	Name       string            `yaml:"name"`
+	Transport  string            `yaml:"transport"` // stdio | sse | http
+	Command    string            `yaml:"command"`
+	Args       []string          `yaml:"args"`
+	Env        map[string]string `yaml:"env"`
+	URL        string            `yaml:"url"`
+	Enabled    *bool             `yaml:"enabled"`
+	TimeoutSec int               `yaml:"timeout_sec"`
 }
 
 func Default() *Config {
@@ -108,12 +127,30 @@ func Default() *Config {
 		Desktop: DesktopConfig{
 			Workspace: "./workspace", TempDir: "./temp", ScreenshotDir: "./screenshots",
 		},
-		Database: DatabaseConfig{Type: "memory"},
-		Logging:  LoggingConfig{Level: "info"},
+		Database: DatabaseConfig{
+			Type: "mysql", AutoMigrate: true,
+			SchemaPath: "docs/dev-ops/mysql/sql/01_schema.sql",
+			MySQL: MySQLConfig{
+				Host: "127.0.0.1", Port: 3306,
+				Database: "ai_desktop_assistant",
+				Username: "root", Password: "123456",
+			},
+		},
+		Logging: LoggingConfig{Level: "info"},
 		Tools: ToolsConfig{
 			File:       ToolToggle{Enabled: true, BaseDir: "./workspace"},
 			Command:    CommandToolConfig{Enabled: true, MaxTimeout: 60, DenyList: []string{"rm -rf /", "format", "mkfs", "shutdown", "reboot", "del /f /s /q"}},
-			Screenshot: ToolToggle{Enabled: true, SaveDir: "./screenshots"},
+			Screenshot: ToolToggle{Enabled: false, SaveDir: "./screenshots"},
+		},
+		MCP: MCPConfig{
+			Enabled: true,
+			Servers: []MCPServerConfig{
+				{
+					Name: "demo", Transport: "stdio",
+					Command: "", // 运行时由 bootstrap 解析为 mcp-demo 二进制
+					Args:    nil, TimeoutSec: 30,
+				},
+			},
 		},
 	}
 }
@@ -166,6 +203,29 @@ func applyEnv(cfg *Config) {
 			cfg.Agent.MaxSteps = n
 		}
 	}
+	if v := os.Getenv("DB_TYPE"); v != "" {
+		cfg.Database.Type = v
+	}
+	if v := os.Getenv("MYSQL_HOST"); v != "" {
+		cfg.Database.MySQL.Host = v
+	}
+	if v := os.Getenv("MYSQL_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			cfg.Database.MySQL.Port = p
+		}
+	}
+	if v := os.Getenv("MYSQL_DATABASE"); v != "" {
+		cfg.Database.MySQL.Database = v
+	}
+	if v := os.Getenv("MYSQL_USER"); v != "" {
+		cfg.Database.MySQL.Username = v
+	}
+	if v := os.Getenv("MYSQL_PASSWORD"); v != "" {
+		cfg.Database.MySQL.Password = v
+	}
+	if v := os.Getenv("MCP_ENABLED"); v != "" {
+		cfg.MCP.Enabled = strings.EqualFold(v, "true") || v == "1"
+	}
 }
 
 func normalize(cfg *Config) {
@@ -190,8 +250,25 @@ func normalize(cfg *Config) {
 	if cfg.Tools.File.BaseDir == "" {
 		cfg.Tools.File.BaseDir = cfg.Desktop.Workspace
 	}
+	if cfg.Database.Type == "" {
+		cfg.Database.Type = "mysql"
+	}
+	if cfg.Database.MySQL.Port <= 0 {
+		cfg.Database.MySQL.Port = 3306
+	}
+	if cfg.Database.MySQL.Host == "" {
+		cfg.Database.MySQL.Host = "127.0.0.1"
+	}
+	if cfg.Database.MySQL.Database == "" {
+		cfg.Database.MySQL.Database = "ai_desktop_assistant"
+	}
 }
 
 func (c *Config) Addr() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
+}
+
+func (c *Config) MySQLDSN() string {
+	m := c.Database.MySQL
+	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", m.Username, m.Password, m.Host, m.Port, m.Database)
 }

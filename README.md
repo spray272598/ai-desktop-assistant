@@ -2,15 +2,21 @@
 
 基于 Go 的桌面 AI 助手，采用 DDD 分层 + 运行时智能体（ReAct）。
 
-## 能力
+## 能力（桌面智能助手核心）
 
-- **Agent Workflow**：统一 ReAct 循环（Thought → Action → Observation），死循环检测、步数/工具预算
+| 优先级 | 能力 | 说明 |
+|--------|------|------|
+| P0 | **会话/消息 MySQL 持久化** | 跨重启对话、里程碑、长期记忆 |
+| P0 | **本地工具** | 工作区文件读写、安全命令执行 |
+| P0 | **真实 MCP** | stdio / SSE(HTTP) 客户端，工具自动注册进 Agent |
+| P0 | **运行时 Agent** | ReAct 循环、意图识别、混合窗口裁剪、动态 Prompt |
+| P1 | 截图 | 可选，默认关闭 |
+
+- **Agent Workflow**：Thought → Action → Observation，死循环检测、步数/工具预算
 - **意图识别**：规则优先 + LLM 降级，会话上下文追踪与缓存
-- **上下文管理**：ContextProvider 拼装 + HybridReducer（Priority ∪ SlidingWindow）
-- **动态 Prompt**：环境 / 工具 / 里程碑 / 任务分区注入
-- **桌面工具**：文件（工作区 jail）、命令（deny list）、截图（Windows/macOS/Linux）
+- **上下文管理**：ContextProvider + HybridReducer + CoreMemory
 - **HTTP + SSE**：`/api/v1/chat`、`/api/v1/chat/stream`
-- **本地 Docker 部署**
+- **Docker Compose**：assistant + MySQL
 
 ## 快速开始
 
@@ -32,10 +38,10 @@ set LLM_USE_MOCK=false
 go run ./cmd/server
 ```
 
-### Docker 本地部署
+### Docker 本地部署（含 MySQL）
 
 ```bash
-# Mock
+# 构建并启动 assistant + mysql
 docker compose up -d --build
 
 # 真实模型
@@ -43,7 +49,24 @@ docker compose up -d --build
 $env:LLM_API_KEY="sk-xxx"; $env:LLM_USE_MOCK="false"; docker compose up -d --build
 ```
 
-服务地址：`http://localhost:8080`
+服务地址：`http://localhost:8080`  
+MySQL：`localhost:3306` / root / 123456 / `ai_desktop_assistant`
+
+### 本机开发（MySQL + MCP demo）
+
+```bash
+# 1) 起 MySQL（可用 compose 只起库）
+docker compose up -d mysql
+
+# 2) 构建 MCP demo 与主程序
+go build -o mcp-demo.exe ./cmd/mcp-demo
+go build -o assistant.exe ./cmd/server
+
+# 3) 运行（configs 默认连 127.0.0.1:3306）
+./assistant.exe -config configs/config.yaml
+```
+
+无 MySQL 时自动降级 `memory` 仓储并打日志。
 
 ### API 示例
 
@@ -95,12 +118,34 @@ workspace/              文件工具沙箱目录
 | `SERVER_PORT` | 端口，默认 8080 |
 | `DESKTOP_WORKSPACE` | 工作区路径 |
 
+## MCP 配置
+
+编辑 `configs/config.yaml`：
+
+```yaml
+mcp:
+  enabled: true
+  servers:
+    - name: demo
+      transport: stdio
+      command: ""          # 空则自动找 mcp-demo
+      timeout_sec: 30
+    # - name: fs
+    #   transport: stdio
+    #   command: npx
+    #   args: ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"]
+    # - name: remote
+    #   transport: sse
+    #   url: "https://host/mcp/sse"
+```
+
 ## 注意
 
-- 容器内**无法**真正操作宿主机桌面截图/任意路径；文件操作映射到挂载的 `workspace/`
-- 命令执行带危险命令拦截，但仍需注意部署环境权限
-- 默认内存仓储，重启丢会话；后续可接 MySQL
+- 文件工具仅限 `workspace/` 沙箱；命令有 deny list
+- 截图默认关闭；容器内无法操作宿主机桌面
+- MySQL 连不上时降级内存模式（仅便于本地无库调试）
 
 ## License
 
 MIT
+

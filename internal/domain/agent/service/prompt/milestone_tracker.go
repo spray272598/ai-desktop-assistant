@@ -1,18 +1,22 @@
 package prompt
 
 import (
+	"context"
 	"regexp"
 	"strings"
 	"sync"
 
+	"github.com/ai-desktop/assistant/internal/domain/agent/adapter/repository"
 	"github.com/ai-desktop/assistant/internal/domain/agent/model/valobj"
 )
 
-// MilestoneTracker 里程碑追踪 + 用户纠正检测
+// MilestoneTracker 里程碑追踪 + 可选持久化
 type MilestoneTracker struct {
 	mu         sync.RWMutex
 	milestones map[string][]*valobj.MilestoneVO
 	maxHistory int
+	repo       repository.IMilestoneRepository
+	memoryRepo repository.ICoreMemoryRepository
 }
 
 var (
@@ -33,32 +37,57 @@ func NewMilestoneTracker(maxHistory int) *MilestoneTracker {
 	}
 }
 
+func (t *MilestoneTracker) SetRepository(repo repository.IMilestoneRepository) {
+	t.repo = repo
+}
+
+func (t *MilestoneTracker) SetMemoryRepository(repo repository.ICoreMemoryRepository) {
+	t.memoryRepo = repo
+}
+
 func (t *MilestoneTracker) AddMilestone(sessionID string, milestone *valobj.MilestoneVO) {
 	if milestone == nil {
 		return
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	history := append(t.milestones[sessionID], milestone)
 	if len(history) > t.maxHistory {
 		history = history[len(history)-t.maxHistory:]
 	}
 	t.milestones[sessionID] = history
+	t.mu.Unlock()
+
+	if t.repo != nil {
+		_ = t.repo.Save(context.Background(), sessionID, milestone)
+	}
 }
 
 func (t *MilestoneTracker) GetMilestones(sessionID string) []*valobj.MilestoneVO {
 	t.mu.RLock()
-	defer t.mu.RUnlock()
 	src := t.milestones[sessionID]
-	out := make([]*valobj.MilestoneVO, len(src))
-	copy(out, src)
-	return out
+	if len(src) > 0 {
+		out := make([]*valobj.MilestoneVO, len(src))
+		copy(out, src)
+		t.mu.RUnlock()
+		return out
+	}
+	t.mu.RUnlock()
+
+	// 冷启动从 DB 加载
+	if t.repo != nil {
+		list, err := t.repo.ListBySession(context.Background(), sessionID, t.maxHistory)
+		if err == nil && len(list) > 0 {
+			t.mu.Lock()
+			t.milestones[sessionID] = list
+			t.mu.Unlock()
+			return list
+		}
+	}
+	return nil
 }
 
 func (t *MilestoneTracker) GetLastStep(sessionID string) int {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	history := t.milestones[sessionID]
+	history := t.GetMilestones(sessionID)
 	if len(history) == 0 {
 		return 0
 	}
@@ -67,15 +96,16 @@ func (t *MilestoneTracker) GetLastStep(sessionID string) int {
 
 func (t *MilestoneTracker) ClearSession(sessionID string) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	delete(t.milestones, sessionID)
+	t.mu.Unlock()
+	if t.repo != nil {
+		_ = t.repo.DeleteBySession(context.Background(), sessionID)
+	}
 }
 
 func (t *MilestoneTracker) GetMilestonesByType(sessionID string, milestoneType valobj.MilestoneType) []*valobj.MilestoneVO {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
 	var result []*valobj.MilestoneVO
-	for _, m := range t.milestones[sessionID] {
+	for _, m := range t.GetMilestones(sessionID) {
 		if m.IsOfType(milestoneType) {
 			result = append(result, m)
 		}
@@ -83,8 +113,12 @@ func (t *MilestoneTracker) GetMilestonesByType(sessionID string, milestoneType v
 	return result
 }
 
-// DetectAndRecord 根据角色与内容自动识别里程碑类型
+// DetectAndRecord 根据角色与内容自动识别里程碑；用户纠正时写入长期记忆
 func (t *MilestoneTracker) DetectAndRecord(sessionID, role, content string, step int) *valobj.MilestoneVO {
+	return t.DetectAndRecordWithUser(sessionID, "", role, content, step)
+}
+
+func (t *MilestoneTracker) DetectAndRecordWithUser(sessionID, userID, role, content string, step int) *valobj.MilestoneVO {
 	if sessionID == "" || content == "" {
 		return nil
 	}
@@ -118,12 +152,19 @@ func (t *MilestoneTracker) DetectAndRecord(sessionID, role, content string, step
 		return nil
 	}
 
-	// 截断内容
 	c := content
 	if len(c) > 200 {
 		c = c[:200] + "..."
 	}
 	m := valobj.NewMilestone(typ, c, step)
 	t.AddMilestone(sessionID, m)
+
+	// 纠正/错误写入长期记忆
+	if t.memoryRepo != nil && userID != "" {
+		switch typ {
+		case valobj.MilestoneUserCorrection, valobj.MilestoneTaskChange, valobj.MilestoneToolError:
+			_ = t.memoryRepo.Save(context.Background(), userID, sessionID, string(typ), c, "milestone")
+		}
+	}
 	return m
 }

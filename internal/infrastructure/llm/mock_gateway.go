@@ -67,6 +67,16 @@ func (g *MockGateway) Generate(ctx context.Context, req *port.ChatRequest) (*por
 		return toolResp("run_command", map[string]interface{}{"command": cmd}), nil
 	case containsAny(lower, "截图", "screenshot", "截屏"):
 		return toolResp("screenshot", map[string]interface{}{}), nil
+	case containsAny(lower, "当前时间", "几点", "get_time", "what time", "时间"):
+		return toolResp("get_time", map[string]interface{}{}), nil
+	case containsAny(lower, "echo ", "回显"):
+		text := extractAfter(input, []string{"echo", "回显"})
+		if text == "" {
+			text = "hello mcp"
+		}
+		return toolResp("echo", map[string]interface{}{"text": text}), nil
+	case containsAny(lower, "workspace_info", "工作区信息", "环境信息"):
+		return toolResp("workspace_info", map[string]interface{}{}), nil
 	default:
 		return &port.ChatResponse{
 			Content: fmt.Sprintf("我收到了你的请求：%s\n\n（当前为 Mock LLM 模式。设置 LLM_API_KEY 后可使用真实模型。）\n\n你可以尝试：列出文件、读取 test.txt、执行命令 echo hello", extractUserRequest(input)),

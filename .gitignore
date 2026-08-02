@@ -6,6 +6,9 @@
 /bin/
 /dist/
 /assistant
+/assistant.exe
+/mcp-demo
+/mcp-demo.exe
 /server
 
 # workspace runtime

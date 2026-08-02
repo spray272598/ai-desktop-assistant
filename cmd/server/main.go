@@ -32,9 +32,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("bootstrap: %v", err)
 	}
+	if app.Closer != nil {
+		defer app.Closer()
+	}
 
 	fmt.Println("🚀 AI Desktop Assistant")
-	fmt.Printf("   version=%s mode=%s\n", cfg.Agent.Version, *mode)
+	fmt.Printf("   version=%s mode=%s db=%s\n", cfg.Agent.Version, *mode, cfg.Database.Type)
 	fmt.Println("📋 已注册工具:")
 	for _, t := range app.Tools.ListTools() {
 		fmt.Printf("   - %s: %s\n", t.Name(), t.Description())
@@ -49,7 +52,7 @@ func main() {
 }
 
 func runHTTP(app *bootstrap.App, cfg *config.Config) {
-	srv := httpserver.NewServer(app.AgentApp, cfg.Addr())
+	srv := httpserver.NewServer(app.AgentApp, cfg.Addr()).WithToolDescriptions(app.Tools.GetToolDescriptions)
 
 	go func() {
 		if err := srv.Start(); err != nil {

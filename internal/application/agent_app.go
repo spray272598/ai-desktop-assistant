@@ -154,6 +154,25 @@ func (app *AgentApp) GetSessionInfo(sessionID string) *dto.SessionInfo {
 	if err != nil || session == nil {
 		return nil
 	}
+	return toSessionInfo(session)
+}
+
+func (app *AgentApp) ListSessionsByUser(userID string) ([]*dto.SessionInfo, error) {
+	list, err := app.sessionRepo.FindByUser(context.Background(), userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*dto.SessionInfo, 0, len(list))
+	for _, s := range list {
+		out = append(out, toSessionInfo(s))
+	}
+	return out, nil
+}
+
+func toSessionInfo(session *entity.SessionEntity) *dto.SessionInfo {
+	if session == nil {
+		return nil
+	}
 	return &dto.SessionInfo{
 		SessionID:    session.ID,
 		AgentID:      session.AgentID,
