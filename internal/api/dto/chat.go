@@ -17,6 +17,8 @@ type ChatResponse struct {
 	Steps             int         `json:"steps"`
 	TokenUsed         int         `json:"tokenUsed"`
 	TaskPlan          interface{} `json:"taskPlan,omitempty"`
+	SkillID           string      `json:"skillId,omitempty"`
+	ErrorClass        string      `json:"errorClass,omitempty"`
 	NeedPermission    bool        `json:"needPermission,omitempty"`
 	PendingPermission interface{} `json:"pendingPermission,omitempty"`
 }
@@ -32,8 +34,11 @@ type ChatStreamEvent struct {
 }
 
 type PermissionApproveRequest struct {
-	ID    string `json:"id"`
-	Scope string `json:"scope"` // once | session
+	ID        string `json:"id"`
+	Scope     string `json:"scope"` // once | session
+	Continue  bool   `json:"continue,omitempty"`  // 批准后自动继续执行
+	SessionID string `json:"sessionId,omitempty"` // continue 时建议带上
+	UserID    string `json:"userId,omitempty"`
 }
 
 type MCPServerRequest struct {

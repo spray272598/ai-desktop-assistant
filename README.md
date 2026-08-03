@@ -11,11 +11,12 @@
 | P0 | MySQL 会话持久化、本地文件/命令、MCP、ReAct、**浏览器自动化**、**React 控制台** |
 | P1 | Redis 缓存/限流、**代码沙箱**、**截图（kbinani）** |
 | P2 | 会话导入导出、WebSocket 设备、Wails 桌面壳骨架 |
-| P3 | MCP 插件市场、多 Agent 编排、模型 A/B 路由 |
+| P3 | **MCP 安装生命周期**、**Skills（SKILL.md）**、权限恢复继续、计划推进、失败分类、多 Agent、模型 A/B |
 
-- Agent：意图 → Router/Planner → ReAct → 权限门 → 工具
+- Agent：意图 → Skill → Router/Planner → ReAct → 权限门 → 动态工具（MCP 热装）
 - 协议：HTTP / SSE / WebSocket
-- 部署：Docker Compose（MySQL + Redis + App）
+- 定位：**可扩展 Agent 运行时**（秋招学习），业务能力优先接社区 MCP
+- 评测手册：[`scripts/eval_agent_smoke.md`](scripts/eval_agent_smoke.md)
 
 ## 快速开始
 

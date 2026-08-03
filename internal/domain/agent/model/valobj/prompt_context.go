@@ -18,6 +18,8 @@ type PromptContextVO struct {
 	CoreMemories      string
 	ProjectName       string
 	ProjectRootPath   string
+	ActiveSkillID     string
+	ActiveSkillHint   string
 }
 
 type ToolInfo struct {

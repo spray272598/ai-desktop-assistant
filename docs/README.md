@@ -17,13 +17,16 @@
 ## 核心代码地图
 
 ```
-internal/bootstrap/app.go                 组装
-internal/domain/agent/service/engine/     ReAct 心脏
+internal/bootstrap/app.go                 组装（MCP 恢复 + Skills）
+internal/domain/agent/service/engine/     ReAct 心脏（恢复执行/计划推进/预算）
 internal/domain/agent/service/intent/     意图
-internal/domain/agent/service/security/   权限门
+internal/domain/agent/service/security/   权限门 + awaiting 恢复
 internal/domain/agent/service/orchestrator/ 多Agent + 模型路由
-internal/infrastructure/mcp/              MCP 协议
-internal/infrastructure/redis/            缓存限流
+internal/domain/mcp/service/              MCP 安装/健康/热同步
+internal/domain/skill/service/            SKILL.md 加载匹配
+internal/infrastructure/mcp/              MCP 协议客户端
 internal/domain/desktop/service/          文件/浏览器/沙箱/截图
+skills/*/SKILL.md                         示例工作流
+scripts/eval_agent_smoke.md               冒烟评测
 web/src/App.tsx                           React 控制台
 ```

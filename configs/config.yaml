@@ -93,3 +93,8 @@ mcp:
       command: ""
       timeout_sec: 30
       enabled: true
+
+# Skill 工作流（SKILL.md）；工具能力外置 MCP，流程规范走 Skill
+skills:
+  enabled: true
+  dir: "./skills"

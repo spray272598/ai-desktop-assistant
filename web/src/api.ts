@@ -32,6 +32,8 @@ export type ChatResult = {
   steps: number
   tokenUsed: number
   taskPlan?: any
+  skillId?: string
+  errorClass?: string
   needPermission?: boolean
   pendingPermission?: any
 }

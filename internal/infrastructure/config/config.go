@@ -18,9 +18,10 @@ type Config struct {
 	Redis    RedisConfig    `yaml:"redis"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	Tools    ToolsConfig    `yaml:"tools"`
-	MCP      MCPConfig      `yaml:"mcp"`
-	Sandbox  SandboxConfig  `yaml:"sandbox"`
+	MCP       MCPConfig       `yaml:"mcp"`
+	Sandbox   SandboxConfig   `yaml:"sandbox"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
+	Skills    SkillsConfig    `yaml:"skills"`
 }
 
 type ServerConfig struct {
@@ -137,6 +138,12 @@ type RateLimitConfig struct {
 	PerMinute int `yaml:"per_minute"`
 }
 
+// SkillsConfig Skill 工作流目录
+type SkillsConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Dir     string `yaml:"dir"` // 默认 ./skills
+}
+
 func Default() *Config {
 	return &Config{
 		Server: ServerConfig{Host: "0.0.0.0", Port: 8080, Mode: "debug"},
@@ -183,6 +190,7 @@ func Default() *Config {
 				{Name: "demo", Transport: "stdio", Command: "", TimeoutSec: 30},
 			},
 		},
+		Skills: SkillsConfig{Enabled: true, Dir: "./skills"},
 	}
 }
 
@@ -317,6 +325,9 @@ func normalize(cfg *Config) {
 	}
 	if cfg.Sandbox.WorkDir == "" {
 		cfg.Sandbox.WorkDir = "./temp/sandbox"
+	}
+	if cfg.Skills.Dir == "" {
+		cfg.Skills.Dir = "./skills"
 	}
 }
 

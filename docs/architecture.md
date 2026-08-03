@@ -62,13 +62,24 @@
 
 1. **限流** Redis / 内存滑动窗口  
 2. **会话** 加载/创建 Session（MySQL/Memory）  
-3. **意图识别** Rule →（低置信）LLM，结果缓存  
-4. **多 Agent 编排** Router 选路线 → Planner 拆任务 → 生成 Executor 提示  
-5. **动态 Prompt** 环境 + 工具列表 + 里程碑 + 计划  
-6. **ReAct 循环** Thought → ToolCall → Permission → Observation  
-7. **工具执行** 本地 / MCP / Browser / Sandbox  
-8. **持久化** 消息、里程碑、token 估算  
-9. **事件** SSE：intent / route / plan / tool / permission / answer  
+3. **意图识别** Rule →（低置信）LLM，结果缓存；「继续」走轻量意图  
+4. **Skill 匹配** 触发词 / 显式 `/skill-id` → 注入执行指南（可选工具子集）  
+5. **多 Agent 编排** Router → Planner 拆任务 → Executor 提示  
+6. **动态 Prompt** 环境 + **当前 ToolRegistry（含热装 MCP）** + 里程碑 + 计划 + Skill  
+7. **权限恢复** 若已批准 awaiting：先执行该工具 → `plan_update` → 再进循环  
+8. **ReAct 循环** Thought → ToolCall → Permission → Observation（结果截断）  
+9. **计划推进** 按 expectedTools / 顺序 MarkDone，SSE `plan_update`  
+10. **持久化** 消息、里程碑、token 估算  
+11. **事件** SSE：intent / skill / route / plan / plan_update / resume / tool / permission / error(class) / answer  
+
+### 4.1 扩展生态（与业务工具解耦）
+
+```
+社区 MCP（搜索/FS/…） ──install──► MCP Manager ──sync──► ToolRegistry
+本地 SKILL.md        ──install──► SkillService ──match──► System Prompt
+```
+
+**面试要点**：能力实现外置；运行时负责生命周期、权限、规划与可观测。
 
 ## 5. 关键设计决策
 

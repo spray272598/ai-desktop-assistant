@@ -34,18 +34,19 @@ type rule struct {
 
 // PermissionGuard 权限守卫（对标 walicode PermissionGuard）
 type PermissionGuard struct {
-	mu            sync.RWMutex
-	sessionAllow  map[string]map[string]bool // sessionID -> tool:sig -> allowed
-	pending       map[string]*PendingConfirm
-	denyRules     []rule
-	confirmRules  []rule
+	mu           sync.RWMutex
+	sessionAllow map[string]map[string]bool // sessionID -> tool:sig -> allowed
+	pending      map[string]*PendingConfirm
+	awaiting     map[string]*AwaitingResume // sessionID -> 待恢复执行
+	denyRules    []rule
+	confirmRules []rule
 	// 工具级策略
-	writeTools    map[string]bool
-	commandTools  map[string]bool
-	deleteTools   map[string]bool
+	writeTools   map[string]bool
+	commandTools map[string]bool
+	deleteTools  map[string]bool
 	// 会话连续拒绝断路
-	denyStreak    map[string]int
-	circuitLimit  int
+	denyStreak   map[string]int
+	circuitLimit int
 }
 
 // PendingConfirm 待用户确认的操作
@@ -59,10 +60,21 @@ type PendingConfirm struct {
 	CreatedAt time.Time              `json:"createdAt"`
 }
 
+// AwaitingResume 已批准、等待「继续」时立刻执行的工具调用
+type AwaitingResume struct {
+	SessionID string                 `json:"sessionId"`
+	Tool      string                 `json:"tool"`
+	Args      map[string]interface{} `json:"args"`
+	Reason    string                 `json:"reason,omitempty"`
+	PermID    string                 `json:"permId,omitempty"`
+	Ready     bool                   `json:"ready"` // true=已批准可执行
+}
+
 func NewPermissionGuard() *PermissionGuard {
 	g := &PermissionGuard{
 		sessionAllow: make(map[string]map[string]bool),
 		pending:      make(map[string]*PendingConfirm),
+		awaiting:     make(map[string]*AwaitingResume),
 		writeTools:   map[string]bool{"write_file": true},
 		commandTools: map[string]bool{"run_command": true, "run_script": true},
 		deleteTools:  map[string]bool{"delete_file": true},
@@ -170,7 +182,7 @@ func (g *PermissionGuard) Check(sessionID, tool string, args map[string]interfac
 	return Decision{Action: ActionAllow, Tool: tool, Summary: summary}
 }
 
-// CreatePending 创建待确认项
+// CreatePending 创建待确认项，并登记 awaiting（未批准）
 func (g *PermissionGuard) CreatePending(sessionID, tool string, args map[string]interface{}, d Decision) *PendingConfirm {
 	id := fmt.Sprintf("perm-%d", time.Now().UnixNano())
 	p := &PendingConfirm{
@@ -179,11 +191,15 @@ func (g *PermissionGuard) CreatePending(sessionID, tool string, args map[string]
 	}
 	g.mu.Lock()
 	g.pending[id] = p
+	g.awaiting[sessionID] = &AwaitingResume{
+		SessionID: sessionID, Tool: tool, Args: args,
+		Reason: d.Reason, PermID: id, Ready: false,
+	}
 	g.mu.Unlock()
 	return p
 }
 
-// Approve 批准待确认操作（once 或 session）
+// Approve 批准待确认操作（once 或 session），并标记 awaiting.Ready
 func (g *PermissionGuard) Approve(id string, scope string) (*PendingConfirm, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -201,6 +217,15 @@ func (g *PermissionGuard) Approve(id string, scope string) (*PendingConfirm, err
 		g.sessionAllow[p.SessionID][toolSig(p.Tool, p.Args)] = true
 	}
 	g.denyStreak[p.SessionID] = 0
+	// 标记可恢复执行
+	if a, ok := g.awaiting[p.SessionID]; ok && a.PermID == id {
+		a.Ready = true
+	} else {
+		g.awaiting[p.SessionID] = &AwaitingResume{
+			SessionID: p.SessionID, Tool: p.Tool, Args: p.Args,
+			Reason: p.Reason, PermID: id, Ready: true,
+		}
+	}
 	return p, nil
 }
 
@@ -213,8 +238,43 @@ func (g *PermissionGuard) Reject(id string) error {
 		return fmt.Errorf("pending permission not found")
 	}
 	delete(g.pending, id)
+	if a, ok := g.awaiting[p.SessionID]; ok && a.PermID == id {
+		delete(g.awaiting, p.SessionID)
+	}
 	g.denyStreak[p.SessionID]++
 	return nil
+}
+
+// PeekAwaiting 查看会话待恢复项（不消费）
+func (g *PermissionGuard) PeekAwaiting(sessionID string) *AwaitingResume {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	a := g.awaiting[sessionID]
+	if a == nil {
+		return nil
+	}
+	cp := *a
+	return &cp
+}
+
+// TakeReadyResume 取出已批准的恢复项并清除；未批准返回 nil
+func (g *PermissionGuard) TakeReadyResume(sessionID string) *AwaitingResume {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	a, ok := g.awaiting[sessionID]
+	if !ok || a == nil || !a.Ready {
+		return nil
+	}
+	delete(g.awaiting, sessionID)
+	cp := *a
+	return &cp
+}
+
+// ClearAwaiting 清除会话恢复状态
+func (g *PermissionGuard) ClearAwaiting(sessionID string) {
+	g.mu.Lock()
+	delete(g.awaiting, sessionID)
+	g.mu.Unlock()
 }
 
 func (g *PermissionGuard) GetPending(id string) *PendingConfirm {

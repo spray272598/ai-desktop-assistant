@@ -19,21 +19,21 @@ type MarketPlugin struct {
 	Env         map[string]string `json:"env,omitempty"`
 	URL         string            `json:"url,omitempty"`
 	Tags        []string          `json:"tags,omitempty"`
+	Installed   bool              `json:"installed,omitempty"`
+	Online      bool              `json:"online,omitempty"`
 }
 
 // Marketplace 内置插件目录 + 安装到 MCPService
 type Marketplace struct {
-	mu       sync.RWMutex
-	catalog  map[string]MarketPlugin
-	mcp      *MCPService
-	installed map[string]bool
+	mu      sync.RWMutex
+	catalog map[string]MarketPlugin
+	mcp     *MCPService
 }
 
 func NewMarketplace(mcp *MCPService) *Marketplace {
 	m := &Marketplace{
-		catalog:   make(map[string]MarketPlugin),
-		mcp:       mcp,
-		installed: make(map[string]bool),
+		catalog: make(map[string]MarketPlugin),
+		mcp:     mcp,
 	}
 	m.seed()
 	return m
@@ -63,19 +63,38 @@ func (m *Marketplace) seed() {
 			Args: []string{"-y", "@modelcontextprotocol/server-memory"},
 			Tags: []string{"memory"},
 		},
+		{
+			ID: "brave-search", Name: "Brave Search MCP", Description: "网页搜索（需 BRAVE_API_KEY + npx）",
+			Transport: "stdio", Command: "npx",
+			Args: []string{"-y", "@modelcontextprotocol/server-brave-search"},
+			Env:  map[string]string{"BRAVE_API_KEY": ""},
+			Tags: []string{"search", "official"},
+		},
 	}
 	for _, p := range plugins {
 		m.catalog[p.ID] = p
 	}
 }
 
-func (m *Marketplace) List() []MarketPlugin {
+func (m *Marketplace) serverNameFor(p MarketPlugin) string {
+	if p.ID == "demo" {
+		return "demo"
+	}
+	return p.ID
+}
+
+func (m *Marketplace) List(ctx context.Context) []MarketPlugin {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]MarketPlugin, 0, len(m.catalog))
 	for _, p := range m.catalog {
 		cp := p
-		if m.installed[p.ID] {
+		name := m.serverNameFor(p)
+		if m.mcp != nil {
+			cp.Installed = m.mcp.IsServerInstalled(ctx, name)
+			cp.Online = m.mcp.IsOnline(name)
+		}
+		if cp.Installed {
 			cp.Tags = append(append([]string{}, p.Tags...), "installed")
 		}
 		out = append(out, cp)
@@ -83,32 +102,25 @@ func (m *Marketplace) List() []MarketPlugin {
 	return out
 }
 
-func (m *Marketplace) Install(ctx context.Context, id string) error {
+func (m *Marketplace) Install(ctx context.Context, id string) (map[string]interface{}, error) {
 	m.mu.RLock()
 	p, ok := m.catalog[id]
 	m.mu.RUnlock()
 	if !ok {
-		return fmt.Errorf("plugin not found: %s", id)
+		return nil, fmt.Errorf("plugin not found: %s", id)
 	}
 	if m.mcp == nil {
-		return fmt.Errorf("mcp service unavailable")
+		return nil, fmt.Errorf("mcp service unavailable")
 	}
 	cfg := entity.ServerConfig{
-		Name: p.Name, Transport: p.Transport, Command: p.Command,
+		Name: m.serverNameFor(p), Transport: p.Transport, Command: p.Command,
 		Args: p.Args, Env: p.Env, URL: p.URL, Enabled: true, TimeoutSec: 60,
 	}
-	// demo 特殊：name=demo 让 bootstrap findMCPDemoBinary 生效
 	if id == "demo" {
 		cfg.Name = "demo"
-		cfg.Command = ""
+		// command 空：InstallCustom 内对 demo 特判
 	}
-	if err := m.mcp.UpsertServer(ctx, cfg); err != nil {
-		return err
-	}
-	m.mu.Lock()
-	m.installed[id] = true
-	m.mu.Unlock()
-	return nil
+	return m.mcp.InstallCustom(ctx, cfg)
 }
 
 func (m *Marketplace) Uninstall(ctx context.Context, id string) error {
@@ -121,15 +133,12 @@ func (m *Marketplace) Uninstall(ctx context.Context, id string) error {
 	if m.mcp == nil {
 		return fmt.Errorf("mcp service unavailable")
 	}
-	name := p.Name
-	if id == "demo" {
-		name = "demo"
-	}
-	if err := m.mcp.DeleteServer(ctx, name); err != nil {
-		return err
-	}
+	return m.mcp.DeleteServer(ctx, m.serverNameFor(p))
+}
+
+// RegisterCatalog 运行时追加市场条目（测试/扩展）
+func (m *Marketplace) RegisterCatalog(p MarketPlugin) {
 	m.mu.Lock()
-	delete(m.installed, id)
+	m.catalog[p.ID] = p
 	m.mu.Unlock()
-	return nil
 }

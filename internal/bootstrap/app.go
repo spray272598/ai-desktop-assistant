@@ -27,6 +27,7 @@ import (
 	mcpentity "github.com/ai-desktop/assistant/internal/domain/mcp/model/entity"
 	mcpsvc "github.com/ai-desktop/assistant/internal/domain/mcp/service"
 	desktopService "github.com/ai-desktop/assistant/internal/domain/desktop/service"
+	skillsvc "github.com/ai-desktop/assistant/internal/domain/skill/service"
 	"github.com/ai-desktop/assistant/internal/infrastructure/config"
 	"github.com/ai-desktop/assistant/internal/infrastructure/llm"
 	inframcp "github.com/ai-desktop/assistant/internal/infrastructure/mcp"
@@ -45,6 +46,7 @@ type App struct {
 	MCP         *inframcp.Manager
 	MCPService  *mcpsvc.MCPService
 	Marketplace *mcpsvc.Marketplace
+	Skills      *skillsvc.SkillService
 	Export      *application.ExportService
 	Redis       *redisx.Client
 	WSHub       *ws.Hub
@@ -127,7 +129,7 @@ func Build(cfg *config.Config) (*App, error) {
 	}
 	orch := orchestrator.NewMultiAgentOrchestrator(llmPort, breakdown, modelRouter)
 
-	// MCP
+	// MCP：yaml + DB 合并；DB 已安装项重启恢复
 	var mcpManager *inframcp.Manager
 	var mcpService *mcpsvc.MCPService
 	var market *mcpsvc.Marketplace
@@ -146,6 +148,7 @@ func Build(cfg *config.Config) (*App, error) {
 				for _, c := range byName {
 					mcpCfgs = append(mcpCfgs, c)
 				}
+				log.Printf("[bootstrap] MCP restore from DB: %d servers\n", len(dbList))
 			}
 			for _, c := range resolveMCPConfigs(cfg) {
 				if existing, _ := mcpRepo.FindByName(context.Background(), c.Name); existing == nil {
@@ -159,17 +162,25 @@ func Build(cfg *config.Config) (*App, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		_ = mcpManager.Start(ctx)
 		cancel()
+		// 首次同步工具进 registry（OnToolsChanged 也会触发）
 		if toolsList, err := mcpManager.ListTools(context.Background()); err == nil {
 			for _, t := range toolsList {
 				toolRegistry.Register(tools.NewMCPTool(t, mcpManager))
 			}
-			log.Printf("[bootstrap] MCP tools=%d\n", len(toolsList))
+			log.Printf("[bootstrap] MCP tools=%d servers=%d\n", len(toolsList), mcpManager.ClientCount())
 		}
 	}
 
+	// Skills
+	var skillService *skillsvc.SkillService
+	if cfg.Skills.Enabled || cfg.Skills.Dir != "" {
+		skillService = skillsvc.NewSkillService(cfg.Skills.Dir)
+		log.Printf("[bootstrap] skills dir=%s count=%d\n", skillService.RootDir(), len(skillService.List()))
+	}
+
 	agent := entity.NewAgentEntity("desktop-agent", cfg.Agent.Name,
-		"桌面智能助手：文件/命令/浏览器/沙箱/MCP/多Agent",
-		"你是桌面 AI 助手。能力：文件、命令、浏览器、代码沙箱、MCP 扩展。复杂任务先规划再执行，危险操作等待确认。")
+		"可扩展本地 Agent 运行时：ReAct + MCP 热装 + Skill 工作流",
+		"你是桌面 AI 助手。工具能力可经 MCP 扩展；Skill 提供流程规范。复杂任务先规划再执行，危险操作等待确认。")
 	agent.MaxSteps = cfg.Agent.MaxSteps
 
 	loopCfg := engine.DefaultLoopConfig()
@@ -181,11 +192,13 @@ func Build(cfg *config.Config) (*App, error) {
 	eng.SetBreakdown(breakdown)
 	eng.SetPermissionGuard(permGuard)
 	eng.SetOrchestrator(orch)
+	eng.SetSkillService(skillService)
 
 	agentApp := application.NewAgentApp(eng, sessionRepo, messageRepo, "desktop-agent", cfg.Agent.Timeout, cfg.Desktop.Workspace)
 	agentApp.SetMCPService(mcpService)
 	agentApp.SetPermissionGuard(permGuard)
 	agentApp.SetMarketplace(market)
+	agentApp.SetSkillService(skillService)
 	agentApp.SetRedis(rdb)
 	agentApp.SetRateLimit(cfg.RateLimit.Enabled, cfg.RateLimit.PerMinute)
 
@@ -194,13 +207,13 @@ func Build(cfg *config.Config) (*App, error) {
 
 	wsHub := ws.NewHub()
 
-	log.Printf("[bootstrap] agent=%s db=%s tools=%d redis=%v browser=%v sandbox=%v\n",
+	log.Printf("[bootstrap] agent=%s db=%s tools=%d redis=%v browser=%v sandbox=%v skills=%v\n",
 		cfg.Agent.Name, cfg.Database.Type, len(toolRegistry.ListTools()), rdb.Enabled(),
-		cfg.Tools.Browser.Enabled, cfg.Sandbox.Enabled)
+		cfg.Tools.Browser.Enabled, cfg.Sandbox.Enabled, skillService != nil)
 
 	return &App{
 		Config: cfg, AgentApp: agentApp, Engine: eng, Tools: toolRegistry,
-		MCP: mcpManager, MCPService: mcpService, Marketplace: market,
+		MCP: mcpManager, MCPService: mcpService, Marketplace: market, Skills: skillService,
 		Export: exportSvc, Redis: rdb, WSHub: wsHub, ModelRouter: modelRouter,
 		PermGuard: permGuard,
 		Closer: func() {

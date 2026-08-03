@@ -13,6 +13,7 @@ import (
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/engine"
 	"github.com/ai-desktop/assistant/internal/domain/agent/service/security"
 	mcpsvc "github.com/ai-desktop/assistant/internal/domain/mcp/service"
+	skillsvc "github.com/ai-desktop/assistant/internal/domain/skill/service"
 	redisx "github.com/ai-desktop/assistant/internal/infrastructure/redis"
 	"github.com/ai-desktop/assistant/internal/types/common"
 )
@@ -29,6 +30,7 @@ type AgentApp struct {
 	rateEnabled    bool
 	ratePerMin     int
 	permGuard      *security.PermissionGuard
+	skills         *skillsvc.SkillService
 	defaultAgentID string
 	timeoutSec     int
 	workDir        string
@@ -60,6 +62,7 @@ func (app *AgentApp) SetPermissionGuard(g *security.PermissionGuard) { app.permG
 func (app *AgentApp) SetMarketplace(m *mcpsvc.Marketplace)           { app.marketplace = m }
 func (app *AgentApp) SetExport(e *ExportService)                     { app.exportSvc = e }
 func (app *AgentApp) SetRedis(r *redisx.Client)                      { app.redis = r }
+func (app *AgentApp) SetSkillService(s *skillsvc.SkillService)       { app.skills = s }
 func (app *AgentApp) SetRateLimit(enabled bool, perMin int) {
 	app.rateEnabled = enabled
 	app.ratePerMin = perMin
@@ -68,6 +71,7 @@ func (app *AgentApp) MCPService() *mcpsvc.MCPService   { return app.mcpService }
 func (app *AgentApp) Marketplace() *mcpsvc.Marketplace { return app.marketplace }
 func (app *AgentApp) Export() *ExportService           { return app.exportSvc }
 func (app *AgentApp) Redis() *redisx.Client            { return app.redis }
+func (app *AgentApp) Skills() *skillsvc.SkillService   { return app.skills }
 func (app *AgentApp) PermissionGuard() *security.PermissionGuard {
 	if app.permGuard != nil {
 		return app.permGuard
@@ -159,9 +163,20 @@ func (app *AgentApp) Chat(req dto.ChatRequest) (*dto.ChatResponse, error) {
 		Steps:             result.Steps,
 		TokenUsed:         result.TokenUsed,
 		TaskPlan:          result.TaskPlan,
+		SkillID:           result.SkillID,
+		ErrorClass:        string(result.ErrorClass),
 		NeedPermission:    result.NeedPermission,
 		PendingPermission: result.PendingPermission,
 	}, nil
+}
+
+// ContinueAfterPermission 批准后自动恢复执行
+func (app *AgentApp) ContinueAfterPermission(sessionID, userID string) (*dto.ChatResponse, error) {
+	return app.Chat(dto.ChatRequest{
+		SessionID: sessionID,
+		UserID:    userID,
+		Message:   "继续",
+	})
 }
 
 func (app *AgentApp) ChatStream(req dto.ChatRequest) (<-chan dto.ChatStreamEvent, error) {

@@ -82,13 +82,22 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/v1/permission/approve", s.handlePermissionApprove)
 	mux.HandleFunc("/api/v1/permission/reject", s.handlePermissionReject)
 
-	// MCP 热加载 + 插件市场
+	// MCP 热加载 + 插件市场 + 健康/工具
 	mux.HandleFunc("/api/v1/mcp/servers", s.handleMCPServers)
 	mux.HandleFunc("/api/v1/mcp/servers/delete", s.handleMCPDelete)
+	mux.HandleFunc("/api/v1/mcp/install", s.handleMCPInstallCustom)
 	mux.HandleFunc("/api/v1/mcp/reload", s.handleMCPReload)
+	mux.HandleFunc("/api/v1/mcp/health", s.handleMCPHealth)
+	mux.HandleFunc("/api/v1/mcp/tools", s.handleMCPTools)
 	mux.HandleFunc("/api/v1/mcp/market", s.handleMCPMarket)
 	mux.HandleFunc("/api/v1/mcp/market/install", s.handleMCPMarketInstall)
 	mux.HandleFunc("/api/v1/mcp/market/uninstall", s.handleMCPMarketUninstall)
+
+	// Skills
+	mux.HandleFunc("/api/v1/skills", s.handleSkills)
+	mux.HandleFunc("/api/v1/skills/install", s.handleSkillInstall)
+	mux.HandleFunc("/api/v1/skills/uninstall", s.handleSkillUninstall)
+	mux.HandleFunc("/api/v1/skills/reload", s.handleSkillReload)
 
 	// 模型 A/B
 	mux.HandleFunc("/api/v1/models", s.handleModels)
@@ -282,9 +291,31 @@ func (s *Server) handlePermissionApprove(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, err.Error()))
 		return
 	}
-	writeJSON(w, http.StatusOK, response.Success(map[string]interface{}{
-		"approved": true, "pending": p, "hint": "请重新发送指令或发送「继续」以执行已批准操作",
-	}))
+	out := map[string]interface{}{
+		"approved": true, "pending": p,
+		"hint": "已批准。发送「继续」或在 approve 时设 continue=true 自动恢复执行",
+	}
+	// 批准后自动继续 Agent
+	if req.Continue {
+		sid := req.SessionID
+		if sid == "" && p != nil {
+			sid = p.SessionID
+		}
+		uid := req.UserID
+		if uid == "" {
+			uid = "anonymous"
+		}
+		if sid != "" {
+			chatRes, err := s.app.ContinueAfterPermission(sid, uid)
+			if err != nil {
+				out["continueError"] = err.Error()
+			} else {
+				out["continued"] = true
+				out["chat"] = chatRes
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, response.Success(out))
 }
 
 func (s *Server) handlePermissionReject(w http.ResponseWriter, r *http.Request) {
@@ -339,14 +370,78 @@ func (s *Server) handleMCPServers(w http.ResponseWriter, r *http.Request) {
 			Name: req.Name, Transport: req.Transport, Command: req.Command,
 			Args: req.Args, Env: req.Env, URL: req.URL, Enabled: enabled, TimeoutSec: req.TimeoutSec,
 		}
-		if err := svc.UpsertServer(r.Context(), cfg); err != nil {
+		res, err := svc.InstallCustom(r.Context(), cfg)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, err.Error()))
 			return
 		}
-		writeJSON(w, http.StatusOK, response.Success(map[string]interface{}{"ok": true, "name": cfg.Name}))
+		writeJSON(w, http.StatusOK, response.Success(res))
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, response.ErrorFromCode(enums.InvalidParam))
 	}
+}
+
+// handleMCPInstallCustom POST 自定义安装 npx/binary/SSE
+func (s *Server) handleMCPInstallCustom(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, response.ErrorFromCode(enums.InvalidParam))
+		return
+	}
+	svc := s.app.MCPService()
+	if svc == nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "mcp disabled"))
+		return
+	}
+	var req dto.MCPServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, err.Error()))
+		return
+	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	cfg := entity.ServerConfig{
+		Name: req.Name, Transport: req.Transport, Command: req.Command,
+		Args: req.Args, Env: req.Env, URL: req.URL, Enabled: enabled, TimeoutSec: req.TimeoutSec,
+	}
+	res, err := svc.InstallCustom(r.Context(), cfg)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(res))
+}
+
+func (s *Server) handleMCPHealth(w http.ResponseWriter, r *http.Request) {
+	svc := s.app.MCPService()
+	if svc == nil {
+		writeJSON(w, http.StatusOK, response.Success([]interface{}{}))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(svc.Health(r.Context())))
+}
+
+func (s *Server) handleMCPTools(w http.ResponseWriter, r *http.Request) {
+	svc := s.app.MCPService()
+	if svc == nil {
+		writeJSON(w, http.StatusOK, response.Success([]interface{}{}))
+		return
+	}
+	server := r.URL.Query().Get("server")
+	list, err := svc.ListToolsByServer(r.Context(), server)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, response.Error(enums.SystemError.Code, err.Error()))
+		return
+	}
+	out := make([]map[string]interface{}, 0, len(list))
+	for _, t := range list {
+		out = append(out, map[string]interface{}{
+			"name": t.Name, "description": t.Description, "server": t.ServerName,
+			"inputSchema": t.InputSchema,
+		})
+	}
+	writeJSON(w, http.StatusOK, response.Success(out))
 }
 
 func (s *Server) handleMCPDelete(w http.ResponseWriter, r *http.Request) {
@@ -401,7 +496,7 @@ func (s *Server) handleMCPMarket(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, response.Success([]interface{}{}))
 		return
 	}
-	writeJSON(w, http.StatusOK, response.Success(m.List()))
+	writeJSON(w, http.StatusOK, response.Success(m.List(r.Context())))
 }
 
 func (s *Server) handleMCPMarketInstall(w http.ResponseWriter, r *http.Request) {
@@ -421,11 +516,12 @@ func (s *Server) handleMCPMarketInstall(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "id required"))
 		return
 	}
-	if err := m.Install(r.Context(), body.ID); err != nil {
+	res, err := m.Install(r.Context(), body.ID)
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, err.Error()))
 		return
 	}
-	writeJSON(w, http.StatusOK, response.Success(map[string]bool{"installed": true}))
+	writeJSON(w, http.StatusOK, response.Success(res))
 }
 
 func (s *Server) handleMCPMarketUninstall(w http.ResponseWriter, r *http.Request) {
@@ -450,6 +546,95 @@ func (s *Server) handleMCPMarketUninstall(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, response.Success(map[string]bool{"uninstalled": true}))
+}
+
+// ---- Skills ----
+
+func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
+	sk := s.app.Skills()
+	if sk == nil {
+		writeJSON(w, http.StatusOK, response.Success([]interface{}{}))
+		return
+	}
+	if id := r.URL.Query().Get("id"); id != "" {
+		one := sk.Get(id)
+		if one == nil {
+			writeJSON(w, http.StatusNotFound, response.Error(enums.InvalidParam.Code, "skill not found"))
+			return
+		}
+		writeJSON(w, http.StatusOK, response.Success(one))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(sk.List()))
+}
+
+func (s *Server) handleSkillInstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, response.ErrorFromCode(enums.InvalidParam))
+		return
+	}
+	sk := s.app.Skills()
+	if sk == nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "skills disabled"))
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+		ID   string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Path == "" {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "path required (skill dir or SKILL.md)"))
+		return
+	}
+	installed, err := sk.InstallFromPath(body.Path, body.ID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(installed))
+}
+
+func (s *Server) handleSkillUninstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		writeJSON(w, http.StatusMethodNotAllowed, response.ErrorFromCode(enums.InvalidParam))
+		return
+	}
+	sk := s.app.Skills()
+	if sk == nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "skills disabled"))
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == "" {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "id required"))
+		return
+	}
+	if err := sk.Uninstall(body.ID); err != nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(map[string]bool{"uninstalled": true}))
+}
+
+func (s *Server) handleSkillReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, response.ErrorFromCode(enums.InvalidParam))
+		return
+	}
+	sk := s.app.Skills()
+	if sk == nil {
+		writeJSON(w, http.StatusBadRequest, response.Error(enums.InvalidParam.Code, "skills disabled"))
+		return
+	}
+	if err := sk.Reload(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, response.Error(enums.SystemError.Code, err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, response.Success(map[string]interface{}{
+		"reloaded": true, "count": len(sk.List()),
+	}))
 }
 
 func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {

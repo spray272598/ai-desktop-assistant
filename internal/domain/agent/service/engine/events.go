@@ -14,8 +14,25 @@ const (
 	EventComplete    EventType = "complete"
 	EventIntent      EventType = "intent"
 	EventPlan        EventType = "plan"
+	EventPlanUpdate  EventType = "plan_update"
 	EventPermission  EventType = "permission"
 	EventRoute       EventType = "route"
+	EventSkill       EventType = "skill"
+	EventResume      EventType = "resume"
+)
+
+// ErrorClass 失败分类（面试可观测）
+type ErrorClass string
+
+const (
+	ErrClassNone       ErrorClass = ""
+	ErrClassLLM        ErrorClass = "llm"
+	ErrClassTool       ErrorClass = "tool"
+	ErrClassPermission ErrorClass = "permission"
+	ErrClassMCP        ErrorClass = "mcp"
+	ErrClassLoop       ErrorClass = "loop"
+	ErrClassCancel     ErrorClass = "cancel"
+	ErrClassSystem     ErrorClass = "system"
 )
 
 // AgentEvent 引擎事件（SSE 推送）
@@ -38,6 +55,17 @@ func NewEvent(typ EventType, step int, content string) *AgentEvent {
 	}
 }
 
+func NewErrorEvent(step int, class ErrorClass, content string, completed bool) *AgentEvent {
+	return &AgentEvent{
+		Type:      EventError,
+		SubType:   string(class),
+		Step:      step,
+		Content:   content,
+		Completed: completed,
+		Timestamp: time.Now().UnixMilli(),
+	}
+}
+
 // PendingPermissionInfo 返回给前端的待确认信息
 type PendingPermissionInfo struct {
 	ID     string                 `json:"id"`
@@ -49,13 +77,15 @@ type PendingPermissionInfo struct {
 
 // AgentResult 运行结果
 type AgentResult struct {
-	SessionID          string
-	Response           string
-	Intent             string
-	Steps              int
-	TokenUsed          int
-	ToolCalls          int
-	TaskPlan           interface{} `json:"taskPlan,omitempty"`
-	PendingPermission  *PendingPermissionInfo
-	NeedPermission     bool
+	SessionID         string
+	Response          string
+	Intent            string
+	Steps             int
+	TokenUsed         int
+	ToolCalls         int
+	TaskPlan          interface{} `json:"taskPlan,omitempty"`
+	SkillID           string      `json:"skillId,omitempty"`
+	PendingPermission *PendingPermissionInfo
+	NeedPermission    bool
+	ErrorClass        ErrorClass `json:"errorClass,omitempty"`
 }

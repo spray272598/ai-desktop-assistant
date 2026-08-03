@@ -17,7 +17,8 @@ export default function App() {
   const [input, setInput] = useState('')
   const [autoApprove, setAutoApprove] = useState(false)
   const [health, setHealth] = useState('…')
-  const [tab, setTab] = useState<'tools' | 'mcp' | 'market' | 'models'>('tools')
+  const [tab, setTab] = useState<'tools' | 'mcp' | 'market' | 'skills' | 'models'>('tools')
+  const [skills, setSkills] = useState<any[]>([])
   const [busy, setBusy] = useState(false)
 
   const push = (m: Msg) => setMessages((prev) => [...prev, m])
@@ -46,13 +47,14 @@ export default function App() {
       setHealth('offline')
     }
     const sid = await ensureSession()
-    const [ss, ts, mk, mp, pr, md] = await Promise.all([
+    const [ss, ts, mk, mp, pr, md, sk] = await Promise.all([
       api<SessionInfo[]>(`/api/v1/session/list?userId=${USER}`),
       api<ToolInfo[]>('/api/v1/tools'),
       api<any[]>('/api/v1/mcp/market'),
       api<any[]>('/api/v1/mcp/servers'),
       api<any[]>(`/api/v1/permission/pending?sessionId=${encodeURIComponent(sid)}`),
       api<any>('/api/v1/models'),
+      api<any[]>('/api/v1/skills'),
     ])
     setSessions(ss || [])
     setTools(ts || [])
@@ -60,6 +62,7 @@ export default function App() {
     setMcp(mp || [])
     setPerms(pr || [])
     setModels(md || {})
+    setSkills(sk || [])
   }
 
   async function loadHistory(sid: string) {
@@ -108,6 +111,12 @@ export default function App() {
           '\n' +
           data.taskPlan.subTasks.map((t: any) => `  ${t.index}. [${t.status}] ${t.title}`).join('\n')
         push({ role: 'sys', text: plan })
+      }
+      if (data.skillId) {
+        push({ role: 'sys', text: `🧩 Skill: ${data.skillId}` })
+      }
+      if (data.errorClass) {
+        push({ role: 'sys', text: `⚠ errorClass: ${data.errorClass}` })
       }
       if (data.needPermission && data.pendingPermission) {
         push({
@@ -232,7 +241,7 @@ export default function App() {
 
         <div className="right">
           <div className="tabs">
-            {(['tools', 'mcp', 'market', 'models'] as const).map((t) => (
+            {(['tools', 'mcp', 'market', 'skills', 'models'] as const).map((t) => (
               <button key={t} className={'tab' + (tab === t ? ' on' : '')} onClick={() => setTab(t)}>
                 {t}
               </button>
@@ -253,7 +262,7 @@ export default function App() {
                     {s.name} {s.online ? <em className="on">online</em> : <em className="off">off</em>}
                   </b>
                   <span>
-                    {s.transport} · {s.command || s.url}
+                    {s.transport} · tools={s.toolCount ?? 0} · {s.command || s.url}
                   </span>
                 </div>
               ))}
@@ -262,16 +271,25 @@ export default function App() {
                 <div key={p.id} className="chip">
                   <b>
                     {p.name} <small>{p.id}</small>
+                    {p.installed ? <em className="on"> installed</em> : null}
                   </b>
                   <span>{p.description}</span>
                   <div className="row">
                     <button
                       className="btn sm ok"
                       onClick={async () => {
-                        await api('/api/v1/mcp/market/install', {
-                          method: 'POST',
-                          body: JSON.stringify({ id: p.id }),
-                        })
+                        try {
+                          const r = await api<any>('/api/v1/mcp/market/install', {
+                            method: 'POST',
+                            body: JSON.stringify({ id: p.id }),
+                          })
+                          push({
+                            role: 'sys',
+                            text: `已安装 MCP ${p.id} tools=${r?.toolCount ?? '?'}`,
+                          })
+                        } catch (e: any) {
+                          push({ role: 'sys', text: '安装失败: ' + e.message })
+                        }
                         await refreshAll()
                       }}
                     >
@@ -292,6 +310,16 @@ export default function App() {
                   </div>
                 </div>
               ))}
+            {tab === 'skills' &&
+              skills.map((sk) => (
+                <div key={sk.id} className="chip">
+                  <b>
+                    {sk.name} <small>{sk.id}</small>
+                  </b>
+                  <span>{sk.description}</span>
+                  <span className="s">tools: {(sk.tools || []).join(', ') || 'any'}</span>
+                </div>
+              ))}
             {tab === 'models' && (
               <pre className="pre">{JSON.stringify(models, null, 2)}</pre>
             )}
@@ -306,15 +334,28 @@ export default function App() {
                   <button
                     className="btn sm ok"
                     onClick={async () => {
-                      await api('/api/v1/permission/approve', {
-                        method: 'POST',
-                        body: JSON.stringify({ id: p.id, scope: 'once' }),
-                      })
-                      push({ role: 'sys', text: '已批准 ' + p.tool })
+                      try {
+                        const r = await api<any>('/api/v1/permission/approve', {
+                          method: 'POST',
+                          body: JSON.stringify({
+                            id: p.id,
+                            scope: 'once',
+                            continue: true,
+                            sessionId,
+                            userId: USER,
+                          }),
+                        })
+                        push({ role: 'sys', text: '已批准并继续: ' + p.tool })
+                        if (r?.chat?.response) {
+                          push({ role: 'bot', text: r.chat.response })
+                        }
+                      } catch (e: any) {
+                        push({ role: 'sys', text: '批准失败: ' + e.message })
+                      }
                       await refreshAll()
                     }}
                   >
-                    批准
+                    批准并继续
                   </button>
                   <button
                     className="btn sm danger"
